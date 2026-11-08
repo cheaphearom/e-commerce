@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thesis Shop</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f4f2;
+    --surface: #fcfcfb;
+    --border: #e4e3df;
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --text-3: #7a7974;
+    --accent: #2a78d6;
+    --good: #0f8a4a;
+    --good-bg: #e3f4ea;
+    --warn: #a35b00;
+    --warn-bg: #fdf0dc;
+    --bad: #c62f2f;
+    --bad-bg: #fbe5e4;
+    --neutral-bg: #ecebe7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #121211;
+      --surface: #1a1a19;
+      --border: #2e2e2c;
+      --text: #f0efec;
+      --text-2: #c3c2b7;
+      --text-3: #8f8e86;
+      --accent: #3987e5;
+      --good: #4cc483;
+      --good-bg: #16301f;
+      --warn: #e5a54a;
+      --warn-bg: #33270f;
+      --bad: #f07272;
+      --bad-bg: #3a1a1a;
+      --neutral-bg: #262624;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding: 16px 24px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0; font-size: 20px; }
+  header .sub { color: var(--text-3); font-size: 13px; }
+  header .spacer { flex: 1; }
+  main { max-width: 1180px; margin: 0 auto; padding: 20px 24px 48px; display: grid; gap: 20px; }
+  @media (max-width: 700px) { main { padding: 16px; } header { padding: 14px 16px; } }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; min-width: 0; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .hint { color: var(--text-3); font-weight: normal; font-size: 13px; margin-left: 6px; }
+  select, input, button { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; min-height: 36px; }
+  button { cursor: pointer; font-weight: 600; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  a { color: var(--accent); }
+  .customer { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .balance { color: var(--text-2); }
+  .products { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .product { border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: grid; gap: 8px; }
+  .product .name { font-weight: 600; }
+  .product .price { font-size: 18px; font-weight: 700; }
+  .product .stock { color: var(--text-3); font-size: 13px; }
+  .product .buy { display: flex; gap: 8px; }
+  .product input { width: 70px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .pill.good { background: var(--good-bg); color: var(--good); }
+  .pill.bad { background: var(--bad-bg); color: var(--bad); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); }
+  .pill.neutral { background: var(--neutral-bg); color: var(--text-2); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-3); font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .table-scroll { overflow-x: auto; }
+  .muted { color: var(--text-3); }
+  .note { color: var(--text-3); font-size: 13px; margin-top: -8px; }
+  .toast { border-radius: 8px; padding: 10px 14px; display: none; }
+  .toast.show { display: block; }
+  .toast.good { background: var(--good-bg); color: var(--good); }
+  .toast.bad { background: var(--bad-bg); color: var(--bad); }
+  .toast.warn { background: var(--warn-bg); color: var(--warn); }
+  .steps { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; font-size: 12px; }
+  .steps span { padding: 2px 8px; border-radius: 999px; background: var(--neutral-bg); color: var(--text-3); }
+  .steps span.done { background: var(--good-bg); color: var(--good); }
+  .steps span.fail { background: var(--bad-bg); color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Thesis Shop</h1>
+    <div class="sub">Demo store for the saga microservices – every order runs reserve stock → charge payment</div>
+  </div>
+  <div class="spacer"></div>
+  <a href="http://localhost:8000/" target="_blank" rel="noopener">Anomaly monitor ↗</a>
+</header>
+
+<main>
+  <section>
+    <h2>Customer</h2>
+    <div class="customer">
+      <select id="customer" aria-label="Customer"></select>
+      <span id="balance" class="balance"></span>
+    </div>
+  </section>
+
+  <div class="note">Close this tab while an experiment is running: its requests are real traffic and would change the experiment's logs.</div>
+
+  <div id="toast" class="toast" role="status"></div>
+
+  <section>
+    <h2>Products <span class="hint">stock refreshes every 15 s</span></h2>
+    <div id="products" class="products"><div class="muted">Loading…</div></div>
+  </section>
+
+  <section>
+    <h2>Recent orders <span class="hint">all customers, newest first</span></h2>
+    <div class="table-scroll"><table id="orders"></table></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const money = v => Number(v).toLocaleString(undefined, { style: "currency", currency: "USD" });
+const STATUS = {
+  PENDING: ["warn", "Pending"],
+  INVENTORY_RESERVED: ["warn", "Stock reserved"],
+  COMPLETED: ["good", "Completed"],
+  CANCELLED: ["bad", "Cancelled"],
+};
+let accounts = [];
+let products = [];
+
+async function api(path, options = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const reason = body.detail || body.title || body.error || `HTTP ${res.status}`;
+    throw new Error(res.status === 504 ? "The shop is too slow right now (gateway timeout)" : reason);
+  }
+  return body;
+}
+
+function statusPill(status, reason) {
+  const [cls, text] = STATUS[status] || ["neutral", status];
+  return `<span class="pill ${cls}">${esc(text)}</span>${reason ? ` <span class="muted">${esc(reason)}</span>` : ""}`;
+}
+
+async function loadAccounts() {
+  try {
+    accounts = await api("/api/accounts");
+    const sel = $("customer");
+    const current = sel.value || "C-001";
+    sel.innerHTML = accounts.map(a => `<option value="${esc(a.customerId)}">${esc(a.customerId)}</option>`).join("");
+    sel.value = accounts.some(a => a.customerId === current) ? current : accounts[0]?.customerId;
+    showBalance();
+  } catch (e) { $("balance").textContent = `Could not load customers: ${e.message}`; }
+}
+function showBalance() {
+  const a = accounts.find(x => x.customerId === $("customer").value);
+  $("balance").textContent = a ? `Balance: ${money(a.balance)}${Number(a.balance) < 100 ? " – low balance, payments may be declined" : ""}` : "";
+}
+$("customer").addEventListener("change", showBalance);
+
+async function loadProducts() {
+  try {
+    products = await api("/api/products");
+    const box = $("products");
+    const existing = new Map([...box.querySelectorAll("input[data-id]")].map(i => [i.dataset.id, i.value]));
+    box.innerHTML = products.map(p => `
+      <div class="product">
+        <div class="name">${esc(p.name)}</div>
+        <div class="muted">${esc(p.id)}</div>
+        <div class="price">${money(p.price)}</div>
+        <div class="stock">${p.availableStock} in stock · ${p.reservedStock} reserved</div>
+        <div class="buy">
+          <input type="number" min="1" max="100" value="${esc(existing.get(p.id) || 1)}" data-id="${esc(p.id)}" aria-label="Quantity of ${esc(p.name)}">
+          <button class="primary" data-buy="${esc(p.id)}">Order</button>
+        </div>
+      </div>`).join("");
+  } catch (e) { $("products").innerHTML = `<div class="muted">Could not load products: ${esc(e.message)}</div>`; }
+}
+
+function toast(cls, html) {
+  const t = $("toast");
+  t.className = `toast show ${cls}`;
+  t.innerHTML = html;
+}
+
+function steps(order) {
+  const s = order.status;
+  const reserved = s === "INVENTORY_RESERVED" || s === "COMPLETED" || (s === "CANCELLED" && order.failureReason === "INSUFFICIENT_FUNDS");
+  const charged = s === "COMPLETED";
+  const failed = s === "CANCELLED";
+  return `<div class="steps">
+    <span class="done">Order placed</span>
+    <span class="${reserved ? "done" : failed ? "fail" : ""}">Stock reserved</span>
+    <span class="${charged ? "done" : failed && reserved ? "fail" : ""}">Payment charged</span>
+    <span class="${charged ? "done" : failed ? "fail" : ""}">${failed ? "Cancelled" : "Completed"}</span>
+  </div>`;
+}
+
+async function placeOrder(productId, quantity) {
+  const customerId = $("customer").value;
+  const product = products.find(p => p.id === productId);
+  toast("warn", `Placing order for ${quantity} × ${esc(product?.name || productId)}…`);
+  let order;
+  try {
+    order = await api("/api/orders", { method: "POST", body: JSON.stringify({ customerId, productId, quantity }) });
+  } catch (e) { toast("bad", `Order failed: ${esc(e.message)}`); return; }
+  const started = Date.now();
+  while (Date.now() - started < 25000) {
+    const cls = order.status === "COMPLETED" ? "good" : order.status === "CANCELLED" ? "bad" : "warn";
+    toast(cls, `<b>Order ${esc(order.id.slice(0, 8))}</b> – ${quantity} × ${esc(product?.name || productId)} for ${money(order.amount)}: ${statusPill(order.status, order.failureReason)}${steps(order)}`);
+    if (order.status === "COMPLETED" || order.status === "CANCELLED") break;
+    await new Promise(r => setTimeout(r, 500));
+    try { order = await api(`/api/orders/${order.id}`); } catch (e) { /* retry until the deadline */ }
+  }
+  if (order.status !== "COMPLETED" && order.status !== "CANCELLED") {
+    toast("warn", `<b>Order ${esc(order.id.slice(0, 8))}</b> is still ${esc(order.status)} – the system is slow; it finishes or is cancelled by the saga timeout.`);
+  }
+  loadProducts(); loadAccounts(); loadOrders();
+}
+
+$("products").addEventListener("click", ev => {
+  const btn = ev.target.closest("button[data-buy]");
+  if (!btn) return;
+  const input = $("products").querySelector(`input[data-id="${btn.dataset.buy}"]`);
+  const qty = Math.max(1, Math.min(100, parseInt(input.value, 10) || 1));
+  placeOrder(btn.dataset.buy, qty);
+});
+
+async function loadOrders() {
+  try {
+    const orders = await api("/api/orders?limit=12");
+    const names = new Map(products.map(p => [p.id, p.name]));
+    $("orders").innerHTML = `<tr><th>Time</th><th>Customer</th><th>Product</th><th class="num">Qty</th><th class="num">Amount</th><th>Status</th></tr>` +
+      (orders.length ? orders.map(o => `<tr>
+        <td>${esc(new Date(o.createdAt).toLocaleTimeString())}</td><td>${esc(o.customerId)}</td>
+        <td>${esc(names.get(o.productId) || o.productId)}</td><td class="num">${o.quantity}</td>
+        <td class="num">${money(o.amount)}</td><td>${statusPill(o.status, o.failureReason)}</td></tr>`).join("")
+        : `<tr><td colspan="6" class="muted">No orders yet.</td></tr>`);
+  } catch (e) { $("orders").innerHTML = `<tr><td class="muted">Could not load orders: ${esc(e.message)}</td></tr>`; }
+}
+
+// Refresh slowly and only while the tab is visible: every request is real traffic that
+// shows up in the logs the detector analyses.
+const visible = fn => () => { if (!document.hidden) fn(); };
+loadAccounts();
+loadProducts().then(loadOrders);
+setInterval(visible(loadProducts), 15000);
+setInterval(visible(loadOrders), 10000);
+setInterval(visible(loadAccounts), 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { loadProducts(); loadOrders(); } });
+</script>
+</body>
+</html>

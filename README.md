@@ -201,6 +201,16 @@ curl -X POST localhost:8080/api/orders -H 'Content-Type: application/json' \
 
 Logs are written to `./logs/<service>.log`.
 
+Two web pages come with the system:
+
+| Page | Address | What it does |
+|---|---|---|
+| **Shop** | <http://localhost:8080> | choose a customer, order products, watch each order go through the saga (stock reserved → payment charged → completed, or cancelled with the reason) |
+| **Anomaly monitor** | <http://localhost:8000> | service health and active faults, fault injection with the experiment presets, the score of each detector over the last 30 minutes, the latest window with its explanation, recent alerts, and every experiment run with buttons to evaluate it or train the live detector on it, plus links to its report and figures |
+
+Close the shop while an experiment runs: its requests are real traffic in the logs. The monitor
+refuses manual faults while an experiment runs, because they would not be in its labels.
+
 ### 4.2 Run an experiment
 
 ```bash
@@ -370,8 +380,11 @@ UUIDs, timestamps, IPs, business ids (`P-100`, `C-007`), long hex strings and nu
 
 System-wide: counts of `saga_started`, `saga_completed`, `saga_failed`, `saga_compensating`,
 `saga_compensated`, `saga_timeout`, `saga_late_reply`; `saga_success_ratio` (completed / started,
-1.0 when nothing started); `unseen_templates` (lines whose template never appeared in the
-**normal training** logs, which catches new exception messages).
+1.0 when nothing started); `unseen_templates` (WARN/ERROR lines whose template never appeared in
+the **normal training** logs, which catches new exception messages). New INFO messages are not
+counted: a request type the training traffic never made is a change in usage, not a failure,
+and counting it caused false alarms as soon as the system was used differently, e.g. through
+the shop.
 
 **Labels.** A window is anomalous if it overlaps `[fault start, fault end + 15 s]`. The grace period
 covers symptoms that outlast the fault (queued Kafka messages, retries, timeouts).
@@ -442,6 +455,11 @@ window.
 - Labels mark the whole injection interval as anomalous even while a fault is still ramping up
   or has no visible effect yet (e.g. a low error rate on a rarely called endpoint). This lowers
   recall for every method equally.
+- **Environment drift.** Isolation Forest learns "normal" from one run. Applied to freshly
+  restarted services (JVM warm-up) or a busier machine, normal latencies can be a few times
+  higher, and its score sits near the threshold without any fault. Train the live detector on
+  a run from the same setup, and allow a few minutes after restarts. Comparing a model trained
+  on one seed with the next seeds measures this effect.
 - The rule thresholds are reasonable defaults, not tuned to this system; tuned rules would be a
   stronger baseline. Report this, or tune them on the training period.
 - Window-level metrics count long faults more than short ones; per-fault detection rate and delay
@@ -464,7 +482,7 @@ window.
 │       ├── chaos/               ChaosService, ChaosController, ChaosRequest/Status, FaultType
 │       └── config/              CommonWebAutoConfiguration
 │   └── src/main/resources/      logback-spring.xml, AutoConfiguration.imports
-├── api-gateway/                 routes, 10 s response timeout, access-log GlobalFilter
+├── api-gateway/                 routes, 10 s response timeout, access-log GlobalFilter, shop page (static/index.html)
 ├── order-service/               Saga orchestrator: Order, SagaState, REST, listeners, timeout scheduler
 ├── inventory-service/           Product, Reservation, RESERVE/RELEASE, restock API, seeding
 ├── payment-service/             Account, Payment, CHARGE/REFUND, top-up API, seeding
@@ -480,6 +498,8 @@ window.
     │   ├── api.py               FastAPI: /train /evaluate /detect /alerts /notify/test /health + live loop
     │   ├── explain.py           suspected service, kind of problem, strongest signals, example errors
     │   ├── notify.py            Telegram sender, one message per incident (detected / resolved)
+    │   ├── dashboard.py         endpoints of the monitoring page
+    │   └── static/dashboard.html  the monitoring page
     │   ├── cli.py               `evaluate` and `synth` commands
     │   └── synthetic.py         synthetic logs for testing only
     └── tests/                   pytest: parsing, windows/labels, rules, evaluation, API, explanations, notifications

@@ -81,8 +81,9 @@ def test_label_windows_uses_overlap_with_grace():
 
 def test_unseen_templates_counts_lines_not_in_training_templates():
     logs = records_to_frame([rec(1, message="normal id=1"), rec(2, message="normal id=2"),
-                             rec(40, message="Connection reset by peer"), rec(41, message="normal id=3"),
-                             rec(70, message="end")])
+                             rec(40, level="ERROR", message="Connection reset by peer"),
+                             rec(42, message="a new kind of normal request"),     # new INFO: not counted
+                             rec(41, message="normal id=3"), rec(70, message="end")])
     w = build_windows(logs, window=30, step=10)
     known = set(logs.loc[logs["t"] < T0.timestamp() + 30, "template"])
     w = add_unseen_templates(w, logs, known)

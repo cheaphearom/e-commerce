@@ -7,6 +7,7 @@ Endpoints
   GET  /alerts     alerts raised by the live detection loop
   POST /notify/test  send a test message to the configured Telegram chat
   GET  /health     liveness and model status
+  GET  /           monitoring dashboard (see dashboard.py for the endpoints it uses)
 
 A background task tails the log directory every ``LIVE_INTERVAL`` seconds (10 by default),
 scores the newest window and records an alert whenever a method fires. Alerts carry an
@@ -37,6 +38,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from . import __version__
+from .dashboard import register_dashboard
 from .evaluate import evaluate_paths
 from .explain import default_baseline, explain, fit_baseline
 from .features import (
@@ -121,6 +123,7 @@ class DetectorState:
         self.alerts: collections.deque[dict] = collections.deque(maxlen=1000)
         self.last_alerted: dict[str, float] = {}
         self.last_detection: dict | None = None
+        self.history: collections.deque[dict] = collections.deque(maxlen=720)   # 2 h of 10-s windows
         self.polls = 0
         self.baseline: dict = default_baseline()
         self.telegram: TelegramSender | None = None
@@ -212,6 +215,12 @@ class DetectorState:
             result = self._detect_latest()
             if result is not None:
                 self.last_detection = result
+                if not self.history or self.history[-1]["t"] < result["window_end_epoch"]:
+                    self.history.append({
+                        "t": result["window_end_epoch"],
+                        "methods": {m: {"score": i["score"], "threshold": i["threshold"], "alert": i["alert"]}
+                                    for m, i in result["methods"].items()},
+                    })
                 self._record_alerts(result)
                 if self.notifier is not None:
                     self.notifier.update(result)
@@ -328,6 +337,7 @@ def create_app(settings: Settings | None = None, send=None) -> FastAPI:
 
     app = FastAPI(title="Log anomaly detector", version=__version__, lifespan=lifespan)
     app.state.detector = state
+    register_dashboard(app, state, settings)
 
     @app.get("/health")
     def health() -> dict:

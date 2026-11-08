@@ -145,7 +145,13 @@ services:
       LOG_DIR: /logs
       LABELS_PATH: /results/labels.csv
       RESULTS_DIR: /results/detector
+      RESULTS_ROOT: /results
       MODEL_DIR: /models
+      # used by the dashboard for service health and fault injection
+      GATEWAY_URL: http://api-gateway:8080
+      ORDER_SERVICE_URL: http://order-service:8081
+      INVENTORY_SERVICE_URL: http://inventory-service:8082
+      PAYMENT_SERVICE_URL: http://payment-service:8083
       LIVE_DETECTION: "true"
       # Telegram alerts: put the values in a .env file next to this file (see .env.example)
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}

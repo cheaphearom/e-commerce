@@ -15,8 +15,8 @@ System-wide features (prefix ``system__``):
     saga_started, saga_completed, saga_failed, saga_compensating, saga_compensated,
     saga_timeout, saga_late_reply, saga_success_ratio, unseen_templates
 
-``unseen_templates`` counts log lines whose template never occurred in the normal training
-data; it is filled in by :func:`add_unseen_templates` once the training period is known.
+``unseen_templates`` counts WARN/ERROR lines whose template never occurred in the normal
+training data; it is filled in by :func:`add_unseen_templates` once the training period is known.
 """
 from __future__ import annotations
 
@@ -183,14 +183,23 @@ def known_templates(logs: pd.DataFrame, normal_mask: np.ndarray | pd.Series | No
     return set(logs["template"].unique())
 
 
+UNSEEN_LEVELS = ("WARN", "ERROR")
+
+
 def add_unseen_templates(windows: pd.DataFrame, logs: pd.DataFrame, known: Iterable[str]) -> pd.DataFrame:
-    """Fills ``system__unseen_templates`` with the number of lines whose template is not in ``known``."""
+    """Fills ``system__unseen_templates``: WARN/ERROR lines whose template is not in ``known``.
+
+    Only warnings and errors count. A new INFO message (for example a request type the training
+    traffic never made) is a change in usage, not a failure, and counting it caused false alarms
+    as soon as anyone used the system differently from the load generator.
+    """
     windows = windows.copy()
     col = system_name("unseen_templates")
     if windows.empty:
         return windows
     known = set(known)
-    unseen_t = logs.loc[~logs["template"].isin(known), "t"].to_numpy(dtype=float)
+    mask = ~logs["template"].isin(known) & logs["level"].isin(UNSEEN_LEVELS)
+    unseen_t = logs.loc[mask, "t"].to_numpy(dtype=float)
     windows[col] = _Counter(unseen_t).count(windows["window_start"].to_numpy(),
                                             windows["window_end"].to_numpy())
     return windows
