@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--start", help="ISO timestamp; default: load_start from experiment.json")
     ev.add_argument("--end", help="ISO timestamp; default: load_end from experiment.json")
     ev.add_argument("--no-figures", action="store_true")
+    ev.add_argument("--allow-incomplete", action="store_true",
+                    help="evaluate an experiment that is still running or was interrupted")
     ev.add_argument("--json", action="store_true", help="print results.json instead of the summary")
 
     sy = sub.add_parser("synth", help="generate synthetic logs (testing only, not for thesis results)")
@@ -64,7 +66,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             results = evaluate_paths(args.logs, args.labels, out_dir=args.out, window=args.window, step=args.step,
                                      train_frac=args.train_frac, grace=args.grace, seed=args.seed,
-                                     start=args.start, end=args.end, make_figures=not args.no_figures)
+                                     start=args.start, end=args.end, make_figures=not args.no_figures,
+                                     allow_incomplete=args.allow_incomplete)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2

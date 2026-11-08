@@ -100,6 +100,7 @@ class EvaluateRequest(BaseModel):
     start: str | None = None
     end: str | None = None
     make_figures: bool = True
+    allow_incomplete: bool = False
 
 
 class DetectorState:
@@ -368,7 +369,8 @@ def create_app(settings: Settings | None = None, send=None) -> FastAPI:
                 train_frac=request.train_frac,
                 grace=request.grace if request.grace is not None else settings.grace,
                 seed=request.seed if request.seed is not None else settings.seed,
-                start=request.start, end=request.end, make_figures=request.make_figures)
+                start=request.start, end=request.end, make_figures=request.make_figures,
+                allow_incomplete=request.allow_incomplete)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {

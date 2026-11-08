@@ -213,6 +213,12 @@ a random fault (random service, type and severity, 60–180 s) followed by a nor
 180–420 s. It writes `./results/labels.csv` (`fault_id, service, type, start, end, params`, ISO-8601
 UTC) and `./results/experiment.json` (configuration, load start/end, load statistics).
 
+**Run one experiment at a time.** Two runs in parallel would inject faults into the same
+services, and each run's labels would miss the other's faults. A lock file
+`results/.experiment-running` makes a second run refuse to start; it is removed when a run ends
+(if a run was killed, delete it by hand). The evaluation refuses a run that is still going (no
+`experiment.json` yet) or was stopped early; `--allow-incomplete` overrides this.
+
 ### 4.3 Evaluate
 
 Through the detector's API:

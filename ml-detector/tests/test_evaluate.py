@@ -66,3 +66,35 @@ def test_compare_with_rules_buckets():
     assert c["faults_detected_by_both"] == 3
     assert c["mean_time_saved_s"] == (40 + 0 - 20) / 3
     assert c["detected_only_by_ml"] == 1
+
+
+def _copy_run(src, dst, meta=None):
+    import shutil
+    shutil.copytree(src / "logs", dst / "logs")
+    shutil.copy(src / "labels.csv", dst / "labels.csv")
+    if meta is not None:
+        (dst / "experiment.json").write_text(json.dumps(meta))
+
+
+def test_refuses_an_experiment_that_is_still_running(synthetic_run, tmp_path):
+    import pytest
+    _copy_run(synthetic_run, tmp_path)                      # no experiment.json yet
+    with pytest.raises(ValueError, match="still running"):
+        evaluate_paths(tmp_path / "logs", tmp_path / "labels.csv", make_figures=False)
+    results = evaluate_paths(tmp_path / "logs", tmp_path / "labels.csv", make_figures=False,
+                             allow_incomplete=True)
+    assert results["metrics"]
+
+
+def test_refuses_an_interrupted_experiment(synthetic_run, tmp_path):
+    import pytest
+    meta = json.loads((synthetic_run / "experiment.json").read_text())
+    _copy_run(synthetic_run, tmp_path, {**meta, "completed": False})
+    with pytest.raises(ValueError, match="stopped before it finished"):
+        evaluate_paths(tmp_path / "logs", tmp_path / "labels.csv", make_figures=False)
+
+
+def test_missing_labels_file_gives_a_clear_error(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="labels file not found"):
+        evaluate_paths(tmp_path, tmp_path / "labels.csv")

@@ -324,14 +324,29 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
 def evaluate_paths(logs_path: str | os.PathLike, labels_path: str | os.PathLike, out_dir=None,
                    window: float = 30.0, step: float = 10.0, train_frac: float = 0.6, grace: float = 15.0,
                    seed: int = 42, start: str | None = None, end: str | None = None,
-                   make_figures: bool = True) -> dict:
+                   make_figures: bool = True, allow_incomplete: bool = False) -> dict:
     """Loads logs and labels from disk and runs :func:`evaluate`.
 
     If ``experiment.json`` lies next to ``labels.csv``, the evaluation period defaults to the
     time the load generator ran, which keeps service start-up logs out of the data.
+
+    Unless ``allow_incomplete`` is set, an experiment that is still running (no
+    ``experiment.json`` yet) or was interrupted (``"completed": false``) is refused, because
+    its labels do not cover the whole period.
     """
+    if not Path(labels_path).exists():
+        raise ValueError(f"labels file not found: {labels_path} - check the path; if the experiment is "
+                         f"still running, it has not finished its first fault yet")
     labels = load_labels(labels_path)
     meta = load_experiment_meta(labels_path)
+    if not allow_incomplete:
+        if not meta:
+            raise ValueError(f"experiment.json is missing next to {labels_path}: the experiment is probably "
+                             f"still running. Wait until it logs 'experiment finished' (docker ps / "
+                             f"docker logs), or pass --allow-incomplete to evaluate the faults so far")
+        if meta.get("completed") is False:
+            raise ValueError("this experiment was stopped before it finished, so its results are incomplete. "
+                             "Run it again, or pass --allow-incomplete to evaluate it anyway")
     start_ts = pd.Timestamp(start) if start else (pd.Timestamp(meta["load_start"]) if meta.get("load_start") else None)
     end_ts = pd.Timestamp(end) if end else (pd.Timestamp(meta["load_end"]) if meta.get("load_end") else None)
     start_ts = _utc(start_ts)

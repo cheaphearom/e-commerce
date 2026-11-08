@@ -11,7 +11,12 @@ Timeline:
 
 Output folder:
   labels.csv       fault_id, service, type, start, end, params   (ISO-8601 UTC)
-  experiment.json  configuration, start/end of load, warm-up end, final load statistics
+  experiment.json  configuration, start/end of load, warm-up end, final load statistics,
+                   and "completed" (false if the run was interrupted)
+
+Only one experiment may run at a time: a lock file ``.experiment-running`` in the parent of the
+output folder (e.g. results/) stops a second run from starting and mixing its faults into the
+first one. It is removed when the run ends; if a run was killed, delete it by hand.
 
 Faults are activated through each service's /admin/chaos endpoint, which is not routed through
 the gateway and does not appear in the logs.
@@ -29,6 +34,7 @@ import logging
 import os
 import random
 import signal
+import socket
 import sys
 import time
 from pathlib import Path
@@ -61,6 +67,7 @@ SEVERITY = {
 }
 
 LABEL_FIELDS = ("fault_id", "service", "type", "start", "end", "params")
+LOCK_NAME = ".experiment-running"
 
 
 def utc_now() -> dt.datetime:
@@ -104,6 +111,27 @@ def chaos(url: str, method: str, body: dict | None = None) -> dict:
     return r.json()
 
 
+def acquire_lock(out: Path, force: bool = False) -> Path:
+    """Creates the run lock next to the output folder, or exits if another run holds it."""
+    out.mkdir(parents=True, exist_ok=True)
+    lock = out.resolve().parent / LOCK_NAME
+    info = json.dumps({"out": str(out), "started": iso(utc_now()), "host": socket.gethostname()})
+    try:
+        with lock.open("x", encoding="utf-8") as fh:
+            fh.write(info)
+    except FileExistsError:
+        if not force:
+            other = lock.read_text(encoding="utf-8", errors="replace").strip()
+            raise SystemExit(
+                f"ERROR: another experiment is already running: {other}\n"
+                f"Two experiments at the same time inject faults into the same services and spoil "
+                f"both results. Wait until it has finished (docker ps).\n"
+                f"If no experiment is running any more (for example it was killed), delete "
+                f"{lock.name} in the results folder, or pass --force.")
+        lock.write_text(info, encoding="utf-8")
+    return lock
+
+
 class Experiment:
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -115,6 +143,7 @@ class Experiment:
         self.labels_path = self.out / "labels.csv"
         self.active_service: str | None = None
         self.load: LoadGenerator | None = None
+        self.completed = False
 
     def write_label(self, row: dict) -> None:
         new_file = not self.labels_path.exists() or self.labels_path.stat().st_size == 0
@@ -197,6 +226,7 @@ class Experiment:
             remaining = experiment_end - time.monotonic()
             if remaining > 0:
                 time.sleep(remaining)
+            self.completed = True
         finally:
             if self.active_service:
                 self.clear_all()
@@ -214,10 +244,14 @@ class Experiment:
                 "warmup_end": iso(warmup_end),
                 "load_end": iso(load_end),
                 "faults": fault_no,
+                "completed": self.completed,
                 "load_stats": self.load.stats.snapshot(),
             }
             (self.out / "experiment.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-            log.info("experiment finished: %d faults, labels in %s", fault_no, self.labels_path)
+            if self.completed:
+                log.info("experiment finished: %d faults, labels in %s", fault_no, self.labels_path)
+            else:
+                log.warning("experiment stopped early after %d faults; it is marked as incomplete", fault_no)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -235,6 +269,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--types", nargs="+", choices=FAULT_TYPES, default=list(FAULT_TYPES))
     p.add_argument("--health-timeout-s", type=float, default=600.0)
     p.add_argument("--append", action="store_true", help="append to an existing labels.csv")
+    p.add_argument("--force", action="store_true",
+                   help="start even if the lock says another experiment is running")
     args = p.parse_args(argv)
     if args.min_fault_s > args.max_fault_s or args.min_gap_s > args.max_gap_s:
         p.error("min values must not exceed max values")
@@ -246,6 +282,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = parse_args(argv)
+    lock = acquire_lock(Path(args.out), force=args.force)
     experiment = Experiment(args)
 
     def on_signal(signum, _frame):
@@ -258,6 +295,8 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         log.warning("experiment interrupted; labels written so far are kept")
         sys.exit(130)
+    finally:
+        lock.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
