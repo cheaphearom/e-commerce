@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # One image recipe for every Spring Boot module:
 #   docker build --build-arg MODULE=order-service -t order-service .
 
