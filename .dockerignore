@@ -1,0 +1,10 @@
+**/target
+logs
+results
+models
+.git
+.idea
+.vscode
+**/__pycache__
+**/.pytest_cache
+**/.venv

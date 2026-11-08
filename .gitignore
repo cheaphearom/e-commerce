@@ -1,0 +1,12 @@
+target/
+logs/
+results/
+models/
+*.iml
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
