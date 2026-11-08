@@ -13,14 +13,20 @@ COPY inventory-service/pom.xml inventory-service/pom.xml
 COPY payment-service/pom.xml payment-service/pom.xml
 COPY common/src common/src
 COPY ${MODULE}/src ${MODULE}/src
+# The Maven repository is a build cache: a re-run after a network failure reuses every finished
+# download. Retries and long timeouts make the build work on slow connections.
 RUN --mount=type=cache,target=/root/.m2 \
     test -n "${MODULE}" && \
-    mvn -B -q -pl ${MODULE} -am -DskipTests package
+    mvn -B -q -pl ${MODULE} -am -DskipTests \
+        -Daether.connector.http.retryHandler.count=10 \
+        -Daether.connector.connectTimeout=60000 \
+        -Daether.connector.requestTimeout=600000 \
+        package
 
 FROM eclipse-temurin:21-jre
 ARG MODULE
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+RUN apt-get -o Acquire::Retries=10 update \
+    && apt-get -o Acquire::Retries=10 install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 app \
     && mkdir -p /logs && chown app /logs
