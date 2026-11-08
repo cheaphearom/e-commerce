@@ -252,7 +252,59 @@ curl localhost:8000/alerts
 to `./models`. A background loop tails `./logs` every 10 s, scores the newest window with every
 available method and records alerts. The rules work without training.
 
-### 4.5 Without Docker
+Every alert carries an **explanation**: the suspected service, the kind of problem (slow
+responses → like LATENCY, errors → like ERROR, both → like DB_TIMEOUT), the features that deviate
+most from their normal level (learned from the normal training windows), and real error lines
+from the logs of that window. On the 7 faults of a real 30-minute test run, and on synthetic
+faults, it named the injected service and fault type correctly every time.
+
+### 4.5 Telegram alerts
+
+The detector can send each incident to Telegram: **one message when a problem starts** (with the
+explanation) and **one when it is resolved** (no alert for 60 s). It does not send a message for
+every 10-second window.
+
+1. In Telegram, open **@BotFather**, send `/newbot` and follow the steps. Copy the **token**.
+2. Open your new bot and send it any message (e.g. `hi`).
+3. Find your **chat id**: open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser and
+   copy the number at `"chat":{"id": ...}`.
+4. Copy `.env.example` to `.env` (it is git-ignored) and fill in `TELEGRAM_BOT_TOKEN` and
+   `TELEGRAM_CHAT_ID`.
+5. Recreate the detector so it reads the new settings, then send a test message:
+
+```bash
+docker compose up -d ml-detector
+```
+
+```bash
+curl -X POST localhost:8000/notify/test
+```
+
+`NOTIFY_METHODS` chooses which detectors may notify (default: all three);
+`NOTIFY_RESOLVE_AFTER_S` sets when an incident counts as resolved.
+
+Example message:
+
+```
+🚨 Anomaly detected (incident #3)
+Time: 2026-11-08 04:14:40 UTC
+Detected by: Random Forest (0.94), Isolation Forest (0.82)
+
+Suspected service: inventory-service
+Suspected problem: slow responses and errors (database or connection problem, like DB_TIMEOUT)
+
+Strongest signals:
+• inventory-service: p95 latency (ms) = 7154 ms (normal ≈ 5 ms)
+• inventory-service: Kafka message p95 (ms) = 7128 ms (normal ≈ 6 ms)
+• system: saga timeouts = 85 (normal ≈ 0)
+
+Example log lines:
+• [inventory-service] Unhandled exception event=unhandled_exception path=/api/products
+  exception=QueryTimeoutException errorMessage=JDBC query timeout after 5600ms during
+  listProducts; HikariPool-1 - Connection is not available, request time…
+```
+
+### 4.6 Without Docker
 
 ```bash
 mvn -B package
@@ -419,10 +471,12 @@ window.
     │   ├── features.py          sliding windows, features, labels, unseen templates
     │   ├── models.py            RuleBasedDetector, IsolationForestDetector, RandomForestDetector
     │   ├── evaluate.py          split, metrics, delays, comparison, report, figures
-    │   ├── api.py               FastAPI: /train /evaluate /detect /alerts /health + live loop
+    │   ├── api.py               FastAPI: /train /evaluate /detect /alerts /notify/test /health + live loop
+    │   ├── explain.py           suspected service, kind of problem, strongest signals, example errors
+    │   ├── notify.py            Telegram sender, one message per incident (detected / resolved)
     │   ├── cli.py               `evaluate` and `synth` commands
     │   └── synthetic.py         synthetic logs for testing only
-    └── tests/                   pytest: parsing, windows/labels, rules, evaluation, API
+    └── tests/                   pytest: parsing, windows/labels, rules, evaluation, API, explanations, notifications
 ```
 
 ## 8. Build and test

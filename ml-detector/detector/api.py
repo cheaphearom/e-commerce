@@ -5,13 +5,18 @@ Endpoints
   POST /evaluate   run the full offline comparison and write the report files
   GET  /detect     score the most recent window with every available method
   GET  /alerts     alerts raised by the live detection loop
+  POST /notify/test  send a test message to the configured Telegram chat
   GET  /health     liveness and model status
 
 A background task tails the log directory every ``LIVE_INTERVAL`` seconds (10 by default),
-scores the newest window and records an alert whenever a method fires.
+scores the newest window and records an alert whenever a method fires. Alerts carry an
+explanation (suspected service, kind of problem, strongest signals, example log lines) and,
+when Telegram is configured, each incident is reported once when it starts and once when it
+is resolved.
 
 Configuration (environment variables): LOG_DIR, LABELS_PATH, RESULTS_DIR, MODEL_DIR, WINDOW,
-STEP, GRACE, LIVE_DETECTION, LIVE_INTERVAL, BUFFER_MINUTES, TAIL_FROM_START, SEED.
+STEP, GRACE, LIVE_DETECTION, LIVE_INTERVAL, BUFFER_MINUTES, TAIL_FROM_START, SEED,
+TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, NOTIFY_METHODS, NOTIFY_RESOLVE_AFTER_S.
 """
 from __future__ import annotations
 
@@ -33,11 +38,13 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .evaluate import evaluate_paths
+from .explain import default_baseline, explain, fit_baseline
 from .features import (
     SERVICES, add_unseen_templates, build_windows, feature_name, in_fault_mask, known_templates,
     label_windows, system_name,
 )
-from .models import IsolationForestDetector, RandomForestDetector, RuleBasedDetector
+from .models import METHOD_ORDER, IsolationForestDetector, RandomForestDetector, RuleBasedDetector
+from .notify import IncidentNotifier, TelegramSender
 from .parsing import LogTailer, empty_logs, load_experiment_meta, load_labels, load_logs
 
 log = logging.getLogger("detector.api")
@@ -66,6 +73,12 @@ class Settings:
     buffer_minutes: float = field(default_factory=lambda: float(os.environ.get("BUFFER_MINUTES", "10")))
     tail_from_start: bool = field(default_factory=lambda: _env_bool("TAIL_FROM_START", False))
     seed: int = field(default_factory=lambda: int(os.environ.get("SEED", "42")))
+    telegram_token: str = field(default_factory=lambda: os.environ.get("TELEGRAM_BOT_TOKEN", "").strip())
+    telegram_chat_id: str = field(default_factory=lambda: os.environ.get("TELEGRAM_CHAT_ID", "").strip())
+    notify_methods: tuple[str, ...] = field(default_factory=lambda: tuple(
+        m.strip() for m in os.environ.get("NOTIFY_METHODS", ",".join(METHOD_ORDER)).split(",") if m.strip()))
+    notify_resolve_after_s: float = field(
+        default_factory=lambda: float(os.environ.get("NOTIFY_RESOLVE_AFTER_S", "60")))
 
 
 class TrainRequest(BaseModel):
@@ -92,7 +105,8 @@ class EvaluateRequest(BaseModel):
 class DetectorState:
     """Trained models, the rolling log buffer of the live loop, and the alert history."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, send=None):
+        """``send`` overrides how notification texts are delivered (used by tests)."""
         self.settings = settings
         self.lock = threading.RLock()
         self.rules = RuleBasedDetector(step=settings.step)
@@ -107,6 +121,14 @@ class DetectorState:
         self.last_alerted: dict[str, float] = {}
         self.last_detection: dict | None = None
         self.polls = 0
+        self.baseline: dict = default_baseline()
+        self.telegram: TelegramSender | None = None
+        if settings.telegram_token and settings.telegram_chat_id:
+            self.telegram = TelegramSender(settings.telegram_token, settings.telegram_chat_id)
+        if send is None and self.telegram is not None:
+            send = self.telegram.send_async
+        self.notifier = (IncidentNotifier(send, settings.notify_methods, settings.notify_resolve_after_s)
+                         if send is not None else None)
 
     # -- persistence -------------------------------------------------------------------
     def model_path(self) -> Path:
@@ -116,7 +138,7 @@ class DetectorState:
         path = self.model_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({"iforest": self.iforest, "rforest": self.rforest, "known": self.known,
-                     "trained_at": self.trained_at, "training": self.training,
+                     "baseline": self.baseline, "trained_at": self.trained_at, "training": self.training,
                      "window": self.settings.window, "step": self.settings.step}, path)
 
     def load(self) -> bool:
@@ -131,6 +153,7 @@ class DetectorState:
             self.iforest = bundle["iforest"]
             self.rforest = bundle["rforest"]
             self.known = bundle["known"]
+            self.baseline = bundle.get("baseline") or default_baseline()
             self.trained_at = bundle["trained_at"]
             self.training = bundle["training"]
         return True
@@ -159,8 +182,10 @@ class DetectorState:
         if np.unique(y).size == 2:
             rforest = RandomForestDetector(random_state=s.seed).fit(windows, y)
 
+        baseline = fit_baseline(windows[y == 0])
         with self.lock:
             self.iforest, self.rforest, self.known = iforest, rforest, known
+            self.baseline = baseline or default_baseline()
             self.trained_at = dt.datetime.now(dt.timezone.utc).isoformat()
             self.training = {
                 "log_records": int(len(logs)), "windows": int(len(windows)),
@@ -187,6 +212,8 @@ class DetectorState:
             if result is not None:
                 self.last_detection = result
                 self._record_alerts(result)
+                if self.notifier is not None:
+                    self.notifier.update(result)
             return result
 
     def _detect_latest(self) -> dict | None:
@@ -215,6 +242,9 @@ class DetectorState:
             methods[RandomForestDetector.name] = {"score": score, "threshold": self.rforest.threshold,
                                                   "alert": bool(score >= self.rforest.threshold)}
         row = last.iloc[0]
+        explanation = None
+        if any(m["alert"] for m in methods.values()):
+            explanation = explain(row, self.baseline, recent)
         key_features = {feature_name("api-gateway", f): float(row[feature_name("api-gateway", f)])
                         for f in ("http_count", "http_5xx_ratio", "latency_p95")}
         key_features.update({feature_name(svc, "error_count"): float(row[feature_name(svc, "error_count")])
@@ -227,6 +257,7 @@ class DetectorState:
             "window_end_epoch": float(row["window_end"]),
             "methods": methods,
             "features": key_features,
+            "explanation": explanation,
         }
 
     def _record_alerts(self, result: dict) -> None:
@@ -241,6 +272,8 @@ class DetectorState:
                      "score": info["score"], "threshold": info["threshold"]}
             if "fired_rules" in info:
                 alert["fired_rules"] = info["fired_rules"]
+            if result.get("explanation"):
+                alert["explanation"] = result["explanation"]
             self.alerts.append(alert)
             log.warning("anomaly alert: %s score=%.3f window_end=%s", method, info["score"], result["window_end"])
 
@@ -265,9 +298,10 @@ def _iso(epoch: float) -> str:
     return dt.datetime.fromtimestamp(float(epoch), tz=dt.timezone.utc).isoformat()
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, send=None) -> FastAPI:
+    """``send`` replaces the Telegram sender (tests pass a function that records messages)."""
     settings = settings or Settings()
-    state = DetectorState(settings)
+    state = DetectorState(settings, send=send)
 
     async def live_loop() -> None:
         while True:
@@ -297,7 +331,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     def health() -> dict:
         return {"status": "UP", "version": __version__, "live_detection": settings.live,
-                "models": state.status(), "buffered_records": int(len(state.buffer)), "polls": state.polls}
+                "models": state.status(), "buffered_records": int(len(state.buffer)), "polls": state.polls,
+                "telegram_notifications": state.telegram is not None}
+
+    @app.post("/notify/test")
+    def notify_test() -> dict:
+        if state.telegram is None:
+            raise HTTPException(status_code=400,
+                                detail="Telegram is not configured: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
+        try:
+            state.telegram.send("✅ Test message from the log anomaly detector. Telegram alerts are working.")
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        return {"sent": True}
 
     @app.post("/train")
     def train(request: TrainRequest | None = None) -> dict:

@@ -147,6 +147,11 @@ services:
       RESULTS_DIR: /results/detector
       MODEL_DIR: /models
       LIVE_DETECTION: "true"
+      # Telegram alerts: put the values in a .env file next to this file (see .env.example)
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      NOTIFY_METHODS: ${NOTIFY_METHODS:-rules,isolation_forest,random_forest}
+      NOTIFY_RESOLVE_AFTER_S: ${NOTIFY_RESOLVE_AFTER_S:-60}
     volumes:
       - ./logs:/logs
       - ./results:/results
