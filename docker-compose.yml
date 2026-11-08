@@ -1,7 +1,16 @@
 name: log-anomaly-thesis
 
+# Docker keeps its own copy of each container's console output; cap it (the analysed logs are
+# the files in ./logs, which are not affected).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
+
 x-java-service: &java-service
   restart: unless-stopped
+  logging: *logging
   volumes:
     - ./logs:/logs
   depends_on:
@@ -20,6 +29,7 @@ x-java-env: &java-env
 services:
   postgres:
     image: postgres:16
+    logging: *logging
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -36,6 +46,7 @@ services:
 
   kafka:
     image: apache/kafka:3.8.0
+    logging: *logging
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -111,6 +122,7 @@ services:
       start_period: 30s
 
   api-gateway:
+    logging: *logging
     build:
       context: .
       args:
@@ -138,6 +150,7 @@ services:
       start_period: 20s
 
   ml-detector:
+    logging: *logging
     build:
       context: ./ml-detector
     restart: unless-stopped
@@ -166,6 +179,7 @@ services:
       - "8000:8000"
 
   experiment:
+    logging: *logging
     profiles: ["experiment"]
     build:
       context: ./experiment
