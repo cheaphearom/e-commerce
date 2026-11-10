@@ -284,7 +284,34 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
     if labels.empty:
         raise ValueError("labels are empty - the evaluation needs at least one injected fault")
     ds = prepare_dataset(logs, labels, window, step, train_frac, grace, start, end)
-    train, test = ds.train, ds.test
+    dataset = {
+        "log_records": int(len(logs)),
+        "windows_total": int(len(ds.windows)),
+        "windows_dropped_at_split": int(len(ds.windows) - len(ds.train) - len(ds.test)),
+        "faults_total": int(len(labels)),
+        "known_templates": len(ds.known_templates),
+        "period_start": pd.Timestamp(ds.windows["window_start"].min(), unit="s", tz="UTC").isoformat(),
+        "split_at": pd.Timestamp(ds.t_split, unit="s", tz="UTC").isoformat(),
+        "period_end": pd.Timestamp(ds.windows["window_end"].max(), unit="s", tz="UTC").isoformat(),
+        "experiment": meta or {},
+    }
+    config = {"window_s": window, "step_s": step, "train_frac": train_frac, "grace_s": grace, "seed": seed}
+    return run_comparison(ds.train, ds.test, labels, ds.t_split, step, grace, seed, config, dataset,
+                          out_dir=out_dir, make_figures=make_figures, tune_rules=tune_rules,
+                          rule_grid=rule_grid, methods=methods)
+
+
+def run_comparison(train: pd.DataFrame, test: pd.DataFrame, test_labels: pd.DataFrame, t_split: float,
+                   step: float, grace: float, seed: int, config: dict, dataset: dict,
+                   out_dir: str | os.PathLike | None = None, make_figures: bool = True,
+                   tune_rules: bool = True, rule_grid: dict | None = None, methods=None,
+                   extra_results: dict | None = None) -> dict:
+    """Fits every detector on ``train``, scores ``test`` and builds metrics, delays and outputs.
+
+    Shared by :func:`evaluate` (chronological split of one run) and :func:`evaluate_cross`
+    (one run trains, another run tests). Delays are measured for faults of ``test_labels`` that
+    start at or after ``t_split``. ``extra_results`` are added to ``results.json``.
+    """
     if train["label"].sum() == 0:
         raise ValueError("no anomalous windows in the training period - run a longer experiment "
                          "or increase --train-frac")
@@ -305,7 +332,7 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
         preds[name] = det.predict(test)
         metrics[name] = classification_metrics(y_test, preds[name], scores[name], starts, step, test_hours)
 
-    delays = detection_delays(test, labels, preds, ds.t_split, grace)
+    delays = detection_delays(test, test_labels, preds, t_split, grace)
     methods = list(detectors)
     delay_stats = {m: delay_summary(delays, m) for m in methods}
     ml_methods = [m for m in methods if m in ML_METHODS]
@@ -316,27 +343,19 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
 
     results = {
         "config": {
-            "window_s": window, "step_s": step, "train_frac": train_frac, "grace_s": grace, "seed": seed,
+            **config,
             "methods": list(detectors),
             **{r: vars(detectors[r].config) | {} for r in rule_methods},
             **{m: model_config(detectors[m]) for m in ml_methods},
         },
         "dataset": {
-            "log_records": int(len(logs)),
-            "windows_total": int(len(ds.windows)),
+            **dataset,
             "windows_train": int(len(train)),
             "windows_test": int(len(test)),
-            "windows_dropped_at_split": int(len(ds.windows) - len(train) - len(test)),
             "anomalous_windows_train": int(train["label"].sum()),
             "anomalous_windows_test": int(test["label"].sum()),
-            "faults_total": int(len(labels)),
             "faults_test": int(len(delays)),
-            "known_templates": len(ds.known_templates),
-            "period_start": pd.Timestamp(ds.windows["window_start"].min(), unit="s", tz="UTC").isoformat(),
-            "split_at": pd.Timestamp(ds.t_split, unit="s", tz="UTC").isoformat(),
-            "period_end": pd.Timestamp(ds.windows["window_end"].max(), unit="s", tz="UTC").isoformat(),
             "test_hours": float(test_hours),
-            "experiment": meta or {},
         },
         "metrics": metrics,
         "detection_delay": delay_stats,
@@ -354,16 +373,17 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
              for f, v in detectors[LogisticRegressionDetector.name].coefficients(top=20)]
             if LogisticRegressionDetector.name in detectors else []),
     }
+    results.update(extra_results or {})
 
     if out_dir is not None:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         (out / "results.json").write_text(json.dumps(_json_safe(results), indent=2), encoding="utf-8")
         delays.to_csv(out / "detection_delays.csv", index=False)
-        window_predictions(test, labels, scores, preds).to_csv(out / "window_predictions.csv", index=False)
+        window_predictions(test, test_labels, scores, preds).to_csv(out / "window_predictions.csv", index=False)
         (out / "report.md").write_text(render_report(results, delays), encoding="utf-8")
         if make_figures:
-            plot_timeline(test, labels, preds, ds.t_split, grace, out / "timeline.png")
+            plot_timeline(test, test_labels, preds, t_split, grace, out / "timeline.png")
             plot_metrics(metrics, out / "metrics.png")
             plot_delays(delays, methods, out / "detection_delay.png")
         results["outputs"] = sorted(p.name for p in out.iterdir() if p.is_file())
@@ -387,20 +407,9 @@ def model_config(det) -> dict:
     return {}
 
 
-def evaluate_paths(logs_path: str | os.PathLike, labels_path: str | os.PathLike, out_dir=None,
-                   window: float = 30.0, step: float = 10.0, train_frac: float = 0.6, grace: float = 15.0,
-                   seed: int = 42, start: str | None = None, end: str | None = None,
-                   make_figures: bool = True, allow_incomplete: bool = False, tune_rules: bool = True,
-                   rule_grid: dict | None = None, methods=None) -> dict:
-    """Loads logs and labels from disk and runs :func:`evaluate`.
-
-    If ``experiment.json`` lies next to ``labels.csv``, the evaluation period defaults to the
-    time the load generator ran, which keeps service start-up logs out of the data.
-
-    Unless ``allow_incomplete`` is set, an experiment that is still running (no
-    ``experiment.json`` yet) or was interrupted (``"completed": false``) is refused, because
-    its labels do not cover the whole period.
-    """
+def load_run_data(logs_path: str | os.PathLike, labels_path: str | os.PathLike, start: str | None = None,
+                  end: str | None = None, allow_incomplete: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Loads logs, labels and ``experiment.json`` of one run (see :func:`evaluate_paths`)."""
     if not Path(labels_path).exists():
         raise ValueError(f"labels file not found: {labels_path} - check the path; if the experiment is "
                          f"still running, it has not finished its first fault yet")
@@ -416,12 +425,124 @@ def evaluate_paths(logs_path: str | os.PathLike, labels_path: str | os.PathLike,
                              "Run it again, or pass --allow-incomplete to evaluate it anyway")
     start_ts = pd.Timestamp(start) if start else (pd.Timestamp(meta["load_start"]) if meta.get("load_start") else None)
     end_ts = pd.Timestamp(end) if end else (pd.Timestamp(meta["load_end"]) if meta.get("load_end") else None)
-    start_ts = _utc(start_ts)
-    end_ts = _utc(end_ts)
-    logs = load_logs(logs_path, start=start_ts, end=end_ts)
+    logs = load_logs(logs_path, start=_utc(start_ts), end=_utc(end_ts))
+    if logs.empty:
+        raise ValueError(f"no log records in {logs_path} for the selected period")
+    return logs, labels, meta
+
+
+def evaluate_paths(logs_path: str | os.PathLike, labels_path: str | os.PathLike, out_dir=None,
+                   window: float = 30.0, step: float = 10.0, train_frac: float = 0.6, grace: float = 15.0,
+                   seed: int = 42, start: str | None = None, end: str | None = None,
+                   make_figures: bool = True, allow_incomplete: bool = False, tune_rules: bool = True,
+                   rule_grid: dict | None = None, methods=None) -> dict:
+    """Loads logs and labels from disk and runs :func:`evaluate`.
+
+    If ``experiment.json`` lies next to ``labels.csv``, the evaluation period defaults to the
+    time the load generator ran, which keeps service start-up logs out of the data.
+
+    Unless ``allow_incomplete`` is set, an experiment that is still running (no
+    ``experiment.json`` yet) or was interrupted (``"completed": false``) is refused, because
+    its labels do not cover the whole period.
+    """
+    logs, labels, meta = load_run_data(logs_path, labels_path, start, end, allow_incomplete)
     return evaluate(logs, labels, window=window, step=step, train_frac=train_frac, grace=grace, seed=seed,
                     out_dir=out_dir, meta=meta, make_figures=make_figures, tune_rules=tune_rules,
                     rule_grid=rule_grid, methods=methods)
+
+
+# ---------------------------------------------------------------------------------------
+# Cross-run generalisation: train on one whole run, test on another whole run
+# ---------------------------------------------------------------------------------------
+def run_windows(logs: pd.DataFrame, labels: pd.DataFrame, window: float, step: float, grace: float) -> pd.DataFrame:
+    windows = build_windows(logs, window=window, step=step)
+    if len(windows) < 20:
+        raise ValueError(f"only {len(windows)} windows - the log period is too short to evaluate")
+    return label_windows(windows, labels, grace=grace)
+
+
+def evaluate_cross(train_logs: pd.DataFrame, train_labels: pd.DataFrame, test_logs: pd.DataFrame,
+                   test_labels: pd.DataFrame, window: float = 30.0, step: float = 10.0, grace: float = 15.0,
+                   seed: int = 42, out_dir: str | os.PathLike | None = None, make_figures: bool = True,
+                   tune_rules: bool = True, rule_grid: dict | None = None, methods=None,
+                   train_name: str = "train run", test_name: str = "test run",
+                   train_meta: dict | None = None, test_meta: dict | None = None,
+                   within_reference: dict | None = None) -> dict:
+    """Trains every method on the whole training run and tests it on the whole test run.
+
+    Nothing of the test run is used for fitting: the known-template vocabulary comes from the
+    normal logs of the training run, the rules are tuned on its windows, and all models are fitted
+    on its windows. Every fault of the test run is evaluated.
+    ``within_reference`` is the test run's own ``results.json`` (chronological split), if available.
+    """
+    if train_labels.empty or test_labels.empty:
+        raise ValueError("both runs need injected faults (labels.csv is empty)")
+    train = run_windows(train_logs, train_labels, window, step, grace)
+    test = run_windows(test_logs, test_labels, window, step, grace)
+    normal_train_logs = ~in_fault_mask(train_logs["t"].to_numpy(), train_labels, grace)
+    known = known_templates(train_logs, normal_train_logs)
+    train = add_unseen_templates(train, train_logs, known).reset_index(drop=True)
+    test = add_unseen_templates(test, test_logs, known).reset_index(drop=True)
+    t_test = float(test["window_start"].min())
+
+    def iso(t):
+        return pd.Timestamp(t, unit="s", tz="UTC").isoformat()
+
+    dataset = {
+        "log_records": int(len(train_logs) + len(test_logs)),
+        "windows_total": int(len(train) + len(test)),
+        "windows_dropped_at_split": 0,
+        "faults_total": int(len(test_labels)),
+        "faults_train": int(len(train_labels)),
+        "known_templates": len(known),
+        "period_start": iso(test["window_start"].min()),
+        "split_at": iso(t_test),
+        "period_end": iso(test["window_end"].max()),
+        "cross": {"train_run": train_name, "test_run": test_name,
+                  "train_period": [iso(train["window_start"].min()), iso(train["window_end"].max())],
+                  "test_period": [iso(t_test), iso(test["window_end"].max())],
+                  "train_experiment": train_meta or {}, "test_experiment": test_meta or {}},
+        "experiment": test_meta or {},
+    }
+    config = {"mode": "cross", "window_s": window, "step_s": step, "train_frac": None, "grace_s": grace,
+              "seed": seed, "train_run": train_name, "test_run": test_name}
+    extra = {"within_run_reference": _within_reference(within_reference)}
+    return run_comparison(train, test, test_labels, t_test, step, grace, seed, config, dataset,
+                          out_dir=out_dir, make_figures=make_figures, tune_rules=tune_rules,
+                          rule_grid=rule_grid, methods=methods, extra_results=extra)
+
+
+def _within_reference(ref: dict | None) -> dict | None:
+    """F1 and detection rate per method from the test run's own (chronological split) evaluation."""
+    if not ref:
+        return None
+    return {"split_at": ref.get("dataset", {}).get("split_at"),
+            "methods": {m: {"f1": r.get("f1"), "roc_auc": r.get("roc_auc"),
+                            "false_alarms_per_hour": r.get("false_alarms_per_hour"),
+                            "detection_rate": ref.get("detection_delay", {}).get(m, {}).get("detection_rate")}
+                        for m, r in ref.get("metrics", {}).items()}}
+
+
+def cross_paths(train_run: str | os.PathLike, test_run: str | os.PathLike, out_dir=None, window: float = 30.0,
+                step: float = 10.0, grace: float = 15.0, seed: int = 42, make_figures: bool = True,
+                allow_incomplete: bool = False, tune_rules: bool = True, methods=None,
+                logs_subdir: str = "logs", detector_dir: str = "detector") -> dict:
+    """Loads two run folders (``logs/``, ``labels.csv``, ``experiment.json``) and runs :func:`evaluate_cross`."""
+    train_run, test_run = Path(train_run), Path(test_run)
+    if train_run.resolve() == test_run.resolve():
+        raise ValueError("--train-run and --test-run must be different runs")
+    tr_logs, tr_labels, tr_meta = load_run_data(train_run / logs_subdir, train_run / "labels.csv",
+                                                allow_incomplete=allow_incomplete)
+    te_logs, te_labels, te_meta = load_run_data(test_run / logs_subdir, test_run / "labels.csv",
+                                                allow_incomplete=allow_incomplete)
+    ref_path = test_run / detector_dir / "results.json"
+    ref = json.loads(ref_path.read_text(encoding="utf-8")) if ref_path.exists() else None
+    if ref and ref.get("config", {}).get("window_s") not in (None, window):
+        ref = None          # evaluated with another window: not comparable
+    return evaluate_cross(tr_logs, tr_labels, te_logs, te_labels, window=window, step=step, grace=grace, seed=seed,
+                          out_dir=out_dir, make_figures=make_figures, tune_rules=tune_rules, methods=methods,
+                          train_name=train_run.name, test_name=test_run.name, train_meta=tr_meta,
+                          test_meta=te_meta, within_reference=ref)
 
 
 def _utc(ts: pd.Timestamp | None) -> pd.Timestamp | None:
@@ -510,23 +631,73 @@ def render_rule_variants(results: dict) -> list[str]:
     return lines
 
 
+def render_within_reference(results: dict, order: list[str]) -> list[str]:
+    """Cross-run report only: the test run's own (chronological split) results next to the cross-run ones."""
+    ref = results.get("within_run_reference")
+    if not ref:
+        return []
+    cross = results["dataset"]["cross"]
+    lines = ["", "### Cross-run vs within-run", "",
+             f"Within-run = `{cross['test_run']}` evaluated on its own (trained on its first part, tested on the "
+             f"windows after {ref.get('split_at')}). Cross-run = trained on `{cross['train_run']}`. A large drop for "
+             "Random Forest suggests it memorised its training run; a rise in false alarms for Isolation Forest or "
+             "PCA shows environment drift between runs. The test windows differ (whole run vs last part), so "
+             "compare the size of the change, not single digits.", "",
+             "| Method | F1 within | F1 cross | Δ F1 | False alarms / h within | False alarms / h cross | "
+             "Detection rate within | Detection rate cross |",
+             "|---|---:|---:|---:|---:|---:|---:|---:|"]
+    for m in order:
+        w = ref["methods"].get(m)
+        if not w:
+            continue
+        c, d = results["metrics"][m], results["detection_delay"][m]
+        delta = c["f1"] - w["f1"] if w.get("f1") is not None else None
+        lines.append(f"| {METHOD_LABELS[m]} | {_fmt(w.get('f1'))} | {_fmt(c['f1'])} | "
+                     f"{'–' if delta is None else f'{delta:+.3f}'} | {_fmt(w.get('false_alarms_per_hour'), 2)} | "
+                     f"{_fmt(c['false_alarms_per_hour'], 2)} | {_fmt(w.get('detection_rate'), 2)} | "
+                     f"{_fmt(d['detection_rate'], 2)} |")
+    return lines
+
+
 def render_report(results: dict, delays: pd.DataFrame) -> str:
     ds = results["dataset"]
     cfg = results["config"]
     order = _methods(results)
+    cross = ds.get("cross")
+    if cross:
+        dataset_lines = [
+            "# Cross-run evaluation report",
+            "",
+            f"Every method is trained on the **whole** run `{cross['train_run']}` and tested on the **whole** run "
+            f"`{cross['test_run']}`. Nothing of the test run is used for fitting (templates, rule tuning, models).",
+            "",
+            "## Dataset",
+            "",
+            f"- Training run `{cross['train_run']}`: {cross['train_period'][0]} → {cross['train_period'][1]}, "
+            f"{ds['windows_train']} windows ({ds['anomalous_windows_train']} anomalous), {ds['faults_train']} faults",
+            f"- Test run `{cross['test_run']}`: {cross['test_period'][0]} → {cross['test_period'][1]}, "
+            f"{ds['windows_test']} windows ({ds['anomalous_windows_test']} anomalous), {ds['faults_test']} faults",
+            f"- Log records: {ds['log_records']:,}; known normal templates (from the training run): "
+            f"{ds['known_templates']}; {cfg['window_s']:.0f} s window, {cfg['step_s']:.0f} s step, "
+            f"label grace period {cfg['grace_s']:.0f} s",
+        ]
+    else:
+        dataset_lines = [
+            "# Anomaly detection evaluation report",
+            "",
+            "## Dataset",
+            "",
+            f"- Period: {ds['period_start']} → {ds['period_end']} (train/test split at {ds['split_at']})",
+            f"- Log records: {ds['log_records']:,}; known normal templates: {ds['known_templates']}",
+            f"- Windows: {ds['windows_total']} ({cfg['window_s']:.0f} s window, {cfg['step_s']:.0f} s step); "
+            f"train {ds['windows_train']} ({ds['anomalous_windows_train']} anomalous), "
+            f"test {ds['windows_test']} ({ds['anomalous_windows_test']} anomalous), "
+            f"{ds['windows_dropped_at_split']} dropped at the split",
+            f"- Faults: {ds['faults_total']} injected, {ds['faults_test']} in the test period; "
+            f"window label grace period {cfg['grace_s']:.0f} s",
+        ]
     lines = [
-        "# Anomaly detection evaluation report",
-        "",
-        "## Dataset",
-        "",
-        f"- Period: {ds['period_start']} → {ds['period_end']} (train/test split at {ds['split_at']})",
-        f"- Log records: {ds['log_records']:,}; known normal templates: {ds['known_templates']}",
-        f"- Windows: {ds['windows_total']} ({cfg['window_s']:.0f} s window, {cfg['step_s']:.0f} s step); "
-        f"train {ds['windows_train']} ({ds['anomalous_windows_train']} anomalous), "
-        f"test {ds['windows_test']} ({ds['anomalous_windows_test']} anomalous), "
-        f"{ds['windows_dropped_at_split']} dropped at the split",
-        f"- Faults: {ds['faults_total']} injected, {ds['faults_test']} in the test period; "
-        f"window label grace period {cfg['grace_s']:.0f} s",
+        *dataset_lines,
         "",
         "## Q1 / Q2 – Detection quality on the test windows",
         "",
@@ -538,6 +709,7 @@ def render_report(results: dict, delays: pd.DataFrame) -> str:
         lines.append(f"| {METHOD_LABELS[m]} | {_fmt(r['precision'])} | {_fmt(r['recall'])} | {_fmt(r['f1'])} | "
                      f"{_fmt(r['roc_auc'])} | {_fmt(r['false_positive_rate'])} | {r['false_alarm_episodes']} | "
                      f"{_fmt(r['false_alarms_per_hour'], 2)} |")
+    lines += render_within_reference(results, order)
     lines += [
         "",
         "Confusion counts (windows):",

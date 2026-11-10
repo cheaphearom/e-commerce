@@ -167,3 +167,27 @@ duplicates and are not repeated, so they do not inflate the correction; `stats.m
 **D30. Hypothesis wording.** Delay tests are reported as H3₀ (no difference in detection
 delay). Detection tests are reported as "H₀ (no difference in per-fault detection)", since the
 thesis hypotheses do not name one; rename it in `stats.hypothesis_line` if needed.
+
+## Part 5 – Cross-run generalisation (`detector.cli cross`)
+
+**D31. One shared comparison routine.** `evaluate` (chronological split of one run) and
+`cross` (one run trains, another tests) build their training and test windows differently and
+then call the same `run_comparison`, so metrics, delays, rule tuning, comparisons, report and
+figures are computed identically in both modes. The single-run outputs did not change.
+
+**D32. Nothing of the test run is used for fitting.** The known-template vocabulary for
+`unseen_templates` comes from the normal logs of the training run (outside fault windows),
+the rules are tuned on the training run's windows, and every model is fitted on them. A test
+removes test-run faults and checks that all thresholds and the tuned rules stay the same.
+
+**D33. Whole runs, no split.** The training run uses all its windows, the test run all its
+windows (nothing is dropped), and every fault of the test run is evaluated. Each run keeps its
+own load period from its `experiment.json`.
+
+**D34. Within-run reference.** If the test run already has its own evaluation
+(`<test run>/detector/results.json`, same window length), the report puts its F1, false alarms
+per hour and detection rate next to the cross-run values. The test windows differ (whole run
+vs the last 40 %), so the table is for the size and direction of the change: a large F1 drop
+for Random Forest would suggest it memorised its training run; more false alarms for
+Isolation Forest or PCA indicate environment drift. A reference made with another window
+length is ignored.

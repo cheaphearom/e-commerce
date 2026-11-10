@@ -3,6 +3,7 @@
     python -m detector.cli evaluate --logs ../logs --labels ../results/labels.csv --out ../results/eval
     python -m detector.cli synth --out ./synthetic --duration-min 120 --seed 1
     python -m detector.cli aggregate --runs ../results/run_* --out ../results/summary
+    python -m detector.cli cross --train-run ../results/run_1 --test-run ../results/run_2 --out ../results/cross_1_2
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import sys
 from pathlib import Path
 
 from .aggregate import aggregate
-from .evaluate import evaluate_paths
+from .evaluate import cross_paths, evaluate_paths
 from .models import METHOD_LABELS, METHOD_ORDER
 from .synthetic import generate
 
@@ -72,6 +73,21 @@ def main(argv: list[str] | None = None) -> int:
     ag.add_argument("--bootstrap", type=int, default=2000, help="bootstrap resamples for the confidence intervals")
     ag.add_argument("--seed", type=int, default=42, help="seed of the bootstrap")
 
+    cr = sub.add_parser("cross", help="train every method on one whole run and test it on another whole run")
+    cr.add_argument("--train-run", required=True, help="run folder with logs/, labels.csv and experiment.json")
+    cr.add_argument("--test-run", required=True, help="another run folder with the same layout")
+    cr.add_argument("--out", required=True, help="output folder for results.json, report.md and figures")
+    cr.add_argument("--window", type=float, default=30.0)
+    cr.add_argument("--step", type=float, default=10.0)
+    cr.add_argument("--grace", type=float, default=15.0)
+    cr.add_argument("--seed", type=int, default=42)
+    cr.add_argument("--logs-subdir", default="logs", help="log folder inside each run folder")
+    cr.add_argument("--methods", help="comma-separated subset of methods (default: all)")
+    cr.add_argument("--no-rule-tuning", action="store_true")
+    cr.add_argument("--no-figures", action="store_true")
+    cr.add_argument("--allow-incomplete", action="store_true")
+    cr.add_argument("--json", action="store_true", help="print results.json instead of the summary")
+
     sy = sub.add_parser("synth", help="generate synthetic logs (testing only, not for thesis results)")
     sy.add_argument("--out", required=True)
     sy.add_argument("--duration-min", type=float, default=120.0)
@@ -93,6 +109,19 @@ def main(argv: list[str] | None = None) -> int:
                                      allow_incomplete=args.allow_incomplete,
                                      tune_rules=not args.no_rule_tuning,
                                      methods=[m.strip() for m in args.methods.split(",")] if args.methods else None)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps(results, indent=2, default=str) if args.json else _summary(results))
+        print(f"\nwritten to {args.out}", file=sys.stderr)
+        return 0
+    if args.command == "cross":
+        try:
+            results = cross_paths(args.train_run, args.test_run, out_dir=args.out, window=args.window,
+                                  step=args.step, grace=args.grace, seed=args.seed,
+                                  make_figures=not args.no_figures, allow_incomplete=args.allow_incomplete,
+                                  tune_rules=not args.no_rule_tuning, logs_subdir=args.logs_subdir,
+                                  methods=[m.strip() for m in args.methods.split(",")] if args.methods else None)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
