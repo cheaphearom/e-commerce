@@ -191,3 +191,37 @@ vs the last 40 %), so the table is for the size and direction of the change: a l
 for Random Forest would suggest it memorised its training run; more false alarms for
 Isolation Forest or PCA indicate environment drift. A reference made with another window
 length is ignored.
+
+## Part 6 – Overnight script (`scripts/run_all_experiments.sh`)
+
+**D35. Everything that touches `./logs` or `./results` runs in the project's containers.**
+On Linux the containers write those folders as root, so host-side `rm`, `cp` or a host Python
+writing into `results/run_N/` could fail with "permission denied". Clearing and copying logs
+run in the experiment image; `evaluate`, `aggregate` and `cross` run in the `ml-detector`
+image, which `docker compose up --build` rebuilds from the current code each time.
+
+**D36. Clearing `./logs` truncates the active files instead of deleting them.** The services
+keep `<service>.log` open in append mode; deleting it would make them write into an
+unlinked file that no one can read. Truncating keeps the file, and appends continue at the
+new end. Rotated archives (`*.log.gz`) of the previous run are deleted. Logs written before the
+load starts are excluded anyway by the load period in `experiment.json`.
+
+**D37. Locks.** The script refuses to start, and checks again before clearing the logs of
+each run, while the experiment runner's lock `results/.experiment-running` exists. Its own lock
+`.run-all-experiments.lock` sits in the repository root (not in `results/`, which Docker may
+own) and stops a second copy of the script; it is removed when the script ends, also on error.
+
+**D38. Restartable.** A seed whose run folder has `experiment.json` with `"completed": true`
+and `detector/results.json` is skipped, so after a failure the script is simply started again.
+A half-finished run folder stops the script instead of being overwritten; the user decides
+whether to delete it.
+
+**D39. The stack is not restarted between runs.** `docker compose up -d --build --wait` leaves
+running containers alone, so runs 2–5 start with warm JVMs and a populated database (stock and
+balances are refilled by the load generator every two minutes). The 10-minute warm-up and the
+load-period filter keep start-up effects out of every run. Only run 1 may see a cold start.
+
+**D40. Time estimate.** Printed before anything starts: runs × (experiment length + about 8 min
+for start-up, health wait, log copy and evaluation) + about 10 min for aggregate and cross;
+about 15 h 50 min for the default 5 × 180 min. `OVERHEAD_MIN` and `FINAL_MIN` adjust the
+estimate only.
