@@ -1,4 +1,4 @@
-"""Offline evaluation: Rule-based vs Isolation Forest vs Random Forest.
+"""Offline evaluation: rule variants vs Isolation Forest vs Random Forest.
 
 Pipeline
   1. parse logs, build 30 s / 10 s sliding windows, label windows that overlap
@@ -6,7 +6,8 @@ Pipeline
   2. chronological split: windows ending before ``t_split`` train, windows starting after it
      test; windows that cross the split are dropped (no leakage through overlapping windows)
   3. "unseen templates" are counted against the templates of the normal training logs
-  4. fit the detectors on the training windows, score the test windows
+  4. fit the detectors on the training windows (the tuned rule variants choose their thresholds
+     on the training windows only), score the test windows
   5. metrics (Q1/Q2), per-fault detection delay and comparison with the rules (Q3)
 
 Outputs in ``out_dir``: results.json, report.md, detection_delays.csv, timeline.png,
@@ -29,15 +30,18 @@ from .features import (
     label_windows,
 )
 from .models import (
-    METHOD_LABELS, METHOD_ORDER, IsolationForestDetector, RandomForestDetector, RuleBasedDetector,
+    METHOD_LABELS, METHOD_ORDER, ML_METHODS, RULE_METHODS, IsolationForestDetector, RandomForestDetector,
+    RuleBasedDetector, TunedRuleBasedDetector, TunedRuleK1Detector, alert_episodes,
 )
 from .parsing import load_experiment_meta, load_labels, load_logs
 
-# Reference palette, first three categorical slots (validated adjacent and all-pairs).
+# Reference palette, categorical slots in fixed order per method (colour follows the method).
 COLORS = {
     RuleBasedDetector.name: "#2a78d6",
     IsolationForestDetector.name: "#eb6834",
     RandomForestDetector.name: "#1baf7a",
+    TunedRuleBasedDetector.name: "#eda100",
+    TunedRuleK1Detector.name: "#6250d6",
 }
 SURFACE = "#fcfcfb"
 TEXT = "#0b0b0b"
@@ -93,33 +97,24 @@ def prepare_dataset(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30
                    known_templates=known, window=window, step=step, grace=grace)
 
 
-def make_detectors(step: float, seed: int) -> dict:
-    return {
-        RuleBasedDetector.name: RuleBasedDetector(step=step),
-        IsolationForestDetector.name: IsolationForestDetector(random_state=seed),
-        RandomForestDetector.name: RandomForestDetector(random_state=seed),
-    }
+def make_detectors(step: float, seed: int, tune_rules: bool = True, rule_grid: dict | None = None) -> dict:
+    """Every compared method, in :data:`METHOD_ORDER`.
+
+    With ``tune_rules=False`` only the default rules, Isolation Forest and Random Forest are
+    returned (the original three-method comparison).
+    """
+    detectors = {RuleBasedDetector.name: RuleBasedDetector(step=step)}
+    if tune_rules:
+        detectors[TunedRuleBasedDetector.name] = TunedRuleBasedDetector(step=step, grid=rule_grid)
+        detectors[TunedRuleK1Detector.name] = TunedRuleK1Detector(step=step, grid=rule_grid)
+    detectors[IsolationForestDetector.name] = IsolationForestDetector(random_state=seed)
+    detectors[RandomForestDetector.name] = RandomForestDetector(random_state=seed)
+    return detectors
 
 
 # ---------------------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------------------
-def alert_episodes(pred: np.ndarray, starts: np.ndarray, step: float) -> list[tuple[int, int]]:
-    """Maximal runs of consecutive alerting windows as (first index, last index)."""
-    episodes = []
-    i, n = 0, len(pred)
-    while i < n:
-        if pred[i]:
-            j = i
-            while j + 1 < n and pred[j + 1] and abs(starts[j + 1] - starts[j] - step) <= step * 0.5:
-                j += 1
-            episodes.append((i, j))
-            i = j + 1
-        else:
-            i += 1
-    return episodes
-
-
 def classification_metrics(y: np.ndarray, pred: np.ndarray, score: np.ndarray,
                            starts: np.ndarray, step: float, hours: float) -> dict:
     y = np.asarray(y, dtype=int)
@@ -193,13 +188,13 @@ def delay_summary(delays: pd.DataFrame, method: str) -> dict:
     }
 
 
-def compare_with_rules(delays: pd.DataFrame, method: str, eps: float = 1e-6) -> dict:
-    """Per fault: did ``method`` alert earlier than, at the same time as, or later than the rules?"""
+def compare_with_rules(delays: pd.DataFrame, method: str, eps: float = 1e-6, rule: str = "rules") -> dict:
+    """Per fault: did ``method`` alert earlier than, at the same time as, or later than ``rule``?"""
     counts = {"earlier": 0, "same": 0, "later_or_missed": 0, "both_missed": 0}
     saved = []
     for _, row in delays.iterrows():
-        ml_hit, rule_hit = bool(row[f"{method}_detected"]), bool(row["rules_detected"])
-        ml_d, rule_d = row[f"{method}_delay_s"], row["rules_delay_s"]
+        ml_hit, rule_hit = bool(row[f"{method}_detected"]), bool(row[f"{rule}_detected"])
+        ml_d, rule_d = row[f"{method}_delay_s"], row[f"{rule}_delay_s"]
         if not ml_hit and not rule_hit:
             counts["both_missed"] += 1
         elif ml_hit and not rule_hit:
@@ -220,7 +215,7 @@ def compare_with_rules(delays: pd.DataFrame, method: str, eps: float = 1e-6) -> 
         "mean_time_saved_s": float(np.mean(saved)) if saved else None,
         "median_time_saved_s": float(np.median(saved)) if saved else None,
         "detected_only_by_ml": int(sum(1 for _, r in delays.iterrows()
-                                       if r[f"{method}_detected"] and not r["rules_detected"])),
+                                       if r[f"{method}_detected"] and not r[f"{rule}_detected"])),
     }
 
 
@@ -240,7 +235,7 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
              train_frac: float = 0.6, grace: float = 15.0, seed: int = 42,
              start: pd.Timestamp | None = None, end: pd.Timestamp | None = None,
              out_dir: str | os.PathLike | None = None, meta: dict | None = None,
-             make_figures: bool = True) -> dict:
+             make_figures: bool = True, tune_rules: bool = True, rule_grid: dict | None = None) -> dict:
     """Runs the full comparison and (optionally) writes every output file to ``out_dir``."""
     if labels.empty:
         raise ValueError("labels are empty - the evaluation needs at least one injected fault")
@@ -252,7 +247,7 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
     if len(test) == 0:
         raise ValueError("no test windows - decrease --train-frac")
 
-    detectors = make_detectors(step, seed)
+    detectors = make_detectors(step, seed, tune_rules=tune_rules, rule_grid=rule_grid)
     y_train = train["label"].to_numpy()
     for det in detectors.values():
         det.fit(train, y_train)
@@ -269,7 +264,11 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
     delays = detection_delays(test, labels, preds, ds.t_split, grace)
     methods = list(detectors)
     delay_stats = {m: delay_summary(delays, m) for m in methods}
-    comparison = {m: compare_with_rules(delays, m) for m in methods if m != RuleBasedDetector.name}
+    ml_methods = [m for m in methods if m in ML_METHODS]
+    rule_methods = [m for m in methods if m in RULE_METHODS]
+    comparison = {m: compare_with_rules(delays, m) for m in ml_methods}
+    comparison_variants = {r: {m: compare_with_rules(delays, m, rule=r) for m in ml_methods}
+                           for r in rule_methods}
 
     rf: RandomForestDetector = detectors[RandomForestDetector.name]
     iso: IsolationForestDetector = detectors[IsolationForestDetector.name]
@@ -277,6 +276,7 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
         "config": {
             "window_s": window, "step_s": step, "train_frac": train_frac, "grace_s": grace, "seed": seed,
             "rules": vars(detectors[RuleBasedDetector.name].config) | {},
+            **{r: vars(detectors[r].config) | {} for r in rule_methods if r != RuleBasedDetector.name},
             "isolation_forest": {"n_estimators": iso.n_estimators, "percentile": iso.percentile,
                                  "threshold": iso.threshold_, "features": iso.columns_},
             "random_forest": {"n_estimators": rf.n_estimators, "class_weight": "balanced",
@@ -302,6 +302,8 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
         "metrics": metrics,
         "detection_delay": delay_stats,
         "comparison_vs_rules": comparison,
+        "comparison_vs_rule_variants": comparison_variants,
+        "rule_tuning": detectors[TunedRuleBasedDetector.name].tuning_ if tune_rules else None,
         "by_fault_type": breakdown(delays, "type", methods) if len(delays) else {},
         "by_service": breakdown(delays, "service", methods) if len(delays) else {},
         "feature_importance": [{"feature": f, "importance": v} for f, v in rf.feature_importance(top=20)],
@@ -324,7 +326,8 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
 def evaluate_paths(logs_path: str | os.PathLike, labels_path: str | os.PathLike, out_dir=None,
                    window: float = 30.0, step: float = 10.0, train_frac: float = 0.6, grace: float = 15.0,
                    seed: int = 42, start: str | None = None, end: str | None = None,
-                   make_figures: bool = True, allow_incomplete: bool = False) -> dict:
+                   make_figures: bool = True, allow_incomplete: bool = False, tune_rules: bool = True,
+                   rule_grid: dict | None = None) -> dict:
     """Loads logs and labels from disk and runs :func:`evaluate`.
 
     If ``experiment.json`` lies next to ``labels.csv``, the evaluation period defaults to the
@@ -353,7 +356,8 @@ def evaluate_paths(logs_path: str | os.PathLike, labels_path: str | os.PathLike,
     end_ts = _utc(end_ts)
     logs = load_logs(logs_path, start=start_ts, end=end_ts)
     return evaluate(logs, labels, window=window, step=step, train_frac=train_frac, grace=grace, seed=seed,
-                    out_dir=out_dir, meta=meta, make_figures=make_figures)
+                    out_dir=out_dir, meta=meta, make_figures=make_figures, tune_rules=tune_rules,
+                    rule_grid=rule_grid)
 
 
 def _utc(ts: pd.Timestamp | None) -> pd.Timestamp | None:
@@ -387,9 +391,50 @@ def _fmt(v, digits: int = 3, suffix: str = "") -> str:
     return f"{v}{suffix}"
 
 
+def _methods(results: dict) -> list[str]:
+    return [m for m in METHOD_ORDER if m in results["metrics"]]
+
+
+RULE_THRESHOLD_FIELDS = (("gateway_5xx_ratio", "Gateway 5xx ratio >"), ("gateway_p95_ms", "Gateway p95 (ms) >"),
+                         ("errors_per_service", "ERROR lines / service >"), ("min_requests", "Min. requests"),
+                         ("consecutive", "Consecutive windows"))
+
+
+def render_rule_variants(results: dict) -> list[str]:
+    """Report section with the thresholds of every rule variant and how they were chosen."""
+    cfg = results["config"]
+    variants = [m for m in RULE_METHODS if m in results["metrics"]]
+    lines = ["", "## Rule variants", "",
+             "| Setting | " + " | ".join(METHOD_LABELS[v] for v in variants) + " |",
+             "|---|" + "---:|" * len(variants)]
+    for key, label in RULE_THRESHOLD_FIELDS:
+        digits = 2 if key == "gateway_5xx_ratio" else 0
+        lines.append(f"| {label} | " + " | ".join(_fmt(float(cfg[v][key]), digits) for v in variants) + " |")
+    tuning = results.get("rule_tuning")
+    if tuning:
+        grid = "; ".join(f"`{k}` ∈ {{{', '.join(str(x) for x in v)}}}" for k, v in tuning["grid"].items())
+        lines += ["",
+                  f"Tuned on the {tuning['train_windows']} **training windows only** ({tuning['candidates']} "
+                  f"combinations: {grid}). Selection: highest training F1, ties broken by fewer false-alarm "
+                  f"episodes, then by grid order. Chosen setting: training F1 {tuning['train_f1']:.3f}, "
+                  f"{tuning['train_false_alarm_episodes']} false-alarm episodes "
+                  f"({tuning['tied_best']} combination(s) tied on both). "
+                  "`Rule-based (tuned, k=1)` uses the same thresholds with `consecutive = 1`, "
+                  "so it alerts on a single window like the ML models.",
+                  "", "Best grid points on the training windows:", "",
+                  "| consecutive | 5xx ratio | p95 (ms) | ERROR lines | Train F1 | False-alarm episodes | Alerting windows |",
+                  "|---:|---:|---:|---:|---:|---:|---:|"]
+        for r in tuning["top"]:
+            lines.append(f"| {r['consecutive']:.0f} | {r['gateway_5xx_ratio']:.2f} | {r['gateway_p95_ms']:.0f} | "
+                         f"{r['errors_per_service']:.0f} | {r['f1']:.3f} | {r['false_alarm_episodes']:.0f} | "
+                         f"{r['alerts']:.0f} |")
+    return lines
+
+
 def render_report(results: dict, delays: pd.DataFrame) -> str:
     ds = results["dataset"]
     cfg = results["config"]
+    order = _methods(results)
     lines = [
         "# Anomaly detection evaluation report",
         "",
@@ -409,7 +454,7 @@ def render_report(results: dict, delays: pd.DataFrame) -> str:
         "| Method | Precision | Recall | F1 | ROC-AUC | FPR | False-alarm episodes | False alarms / h |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for m in METHOD_ORDER:
+    for m in order:
         r = results["metrics"][m]
         lines.append(f"| {METHOD_LABELS[m]} | {_fmt(r['precision'])} | {_fmt(r['recall'])} | {_fmt(r['f1'])} | "
                      f"{_fmt(r['roc_auc'])} | {_fmt(r['false_positive_rate'])} | {r['false_alarm_episodes']} | "
@@ -421,7 +466,7 @@ def render_report(results: dict, delays: pd.DataFrame) -> str:
         "| Method | TP | FP | TN | FN |",
         "|---|---:|---:|---:|---:|",
     ]
-    for m in METHOD_ORDER:
+    for m in order:
         r = results["metrics"][m]
         lines.append(f"| {METHOD_LABELS[m]} | {r['tp']} | {r['fp']} | {r['tn']} | {r['fn']} |")
 
@@ -432,7 +477,7 @@ def render_report(results: dict, delays: pd.DataFrame) -> str:
         "| Method | Detected | Detection rate | Mean delay | Median delay | Max delay |",
         "|---|---:|---:|---:|---:|---:|",
     ]
-    for m in METHOD_ORDER:
+    for m in order:
         d = results["detection_delay"][m]
         lines.append(f"| {METHOD_LABELS[m]} | {d['detected']}/{d['faults']} | {_fmt(d['detection_rate'], 2)} | "
                      f"{_fmt(d['mean_delay_s'], 1, ' s')} | {_fmt(d['median_delay_s'], 1, ' s')} | "
@@ -450,19 +495,40 @@ def render_report(results: dict, delays: pd.DataFrame) -> str:
                      f"{_fmt(c['median_time_saved_s'], 1, ' s')} |")
     lines.append("")
     lines.append("Time saved = rule delay − ML delay, over faults detected by both (positive = ML earlier).")
+    variants = results.get("comparison_vs_rule_variants") or {}
+    if len(variants) > 1:
+        lines += [
+            "",
+            "### ML compared with each rule variant, per fault",
+            "",
+            "The tuned variants are the fair baseline: their thresholds were chosen on the training "
+            "windows, and the k=1 variant has no built-in `for:` delay. Base conclusions on them.",
+            "",
+            "| Method | Rule variant | Earlier | Same | Later or missed | Both missed | Only ML detected | "
+            "Mean time saved | Median time saved |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for r, per_ml in variants.items():
+            for m, c in per_ml.items():
+                lines.append(f"| {METHOD_LABELS[m]} | {METHOD_LABELS[r]} | {c['earlier']} | {c['same']} | "
+                             f"{c['later_or_missed']} | {c['both_missed']} | {c['detected_only_by_ml']} | "
+                             f"{_fmt(c['mean_time_saved_s'], 1, ' s')} | {_fmt(c['median_time_saved_s'], 1, ' s')} |")
 
     for title, key in (("By fault type", "by_fault_type"), ("By target service", "by_service")):
         if not results[key]:
             continue
         lines += ["", f"### {title}", "",
-                  "| Group | Faults | " + " | ".join(f"{METHOD_LABELS[m]} detected / mean delay" for m in METHOD_ORDER) + " |",
-                  "|---|---:|" + "---:|" * len(METHOD_ORDER)]
+                  "| Group | Faults | " + " | ".join(f"{METHOD_LABELS[m]} detected / mean delay" for m in order) + " |",
+                  "|---|---:|" + "---:|" * len(order)]
         for group, stats in results[key].items():
             cells = []
-            for m in METHOD_ORDER:
+            for m in order:
                 s = stats[m]
                 cells.append(f"{s['detected']}/{s['faults']} / {_fmt(s['mean_delay_s'], 1, ' s')}")
             lines.append(f"| {group} | {stats['faults']} | " + " | ".join(cells) + " |")
+
+    if any(m in results["metrics"] for m in RULE_METHODS[1:]):
+        lines += render_rule_variants(results)
 
     lines += ["", "## Random Forest feature importance (top 20)", "", "| Feature | Importance |", "|---|---:|"]
     for item in results["feature_importance"]:
@@ -470,10 +536,10 @@ def render_report(results: dict, delays: pd.DataFrame) -> str:
 
     if len(delays):
         lines += ["", "## Per-fault detection delays", "",
-                  "| Fault | Service | Type | Duration | " + " | ".join(METHOD_LABELS[m] for m in METHOD_ORDER) + " |",
-                  "|---|---|---|---:|" + "---:|" * len(METHOD_ORDER)]
+                  "| Fault | Service | Type | Duration | " + " | ".join(METHOD_LABELS[m] for m in order) + " |",
+                  "|---|---|---|---:|" + "---:|" * len(order)]
         for _, r in delays.iterrows():
-            cells = [(_fmt(r[f"{m}_delay_s"], 0, " s") if r[f"{m}_detected"] else "missed") for m in METHOD_ORDER]
+            cells = [(_fmt(r[f"{m}_delay_s"], 0, " s") if r[f"{m}_detected"] else "missed") for m in order]
             lines.append(f"| {r['fault_id']} | {r['service']} | {r['type']} | {r['duration_s']:.0f} s | "
                          + " | ".join(cells) + " |")
 
@@ -515,8 +581,9 @@ def plot_timeline(test: pd.DataFrame, labels: pd.DataFrame, preds: dict[str, np.
     plt = _plt()
     t0 = float(test["window_start"].min())
     x = (test["window_end"].to_numpy() - t0) / 60.0
-    fig, axes = plt.subplots(3, 1, figsize=(12, 7.2), sharex=True,
-                             gridspec_kw={"height_ratios": [2, 2, 1.6]})
+    n_methods = sum(1 for m in METHOD_ORDER if m in preds)
+    fig, axes = plt.subplots(3, 1, figsize=(12, 6.2 + 0.35 * n_methods), sharex=True,
+                             gridspec_kw={"height_ratios": [2, 2, 0.35 + 0.42 * n_methods]})
     faults = [(f.start.timestamp(), f.end.timestamp(), f.type, f.service)
               for f in labels.itertuples(index=False) if f.end.timestamp() >= t0]
 
@@ -551,12 +618,13 @@ def plot_timeline(test: pd.DataFrame, labels: pd.DataFrame, preds: dict[str, np.
     shade(ax)
     width = (test["window_end"].iloc[0] - test["window_start"].iloc[0]) / 60.0 if len(test) else 0.5
     step_min = (test["window_start"].diff().median() / 60.0) if len(test) > 1 else width
-    for row, m in enumerate(METHOD_ORDER):
+    order = [m for m in METHOD_ORDER if m in preds]
+    for row, m in enumerate(order):
         idx = np.flatnonzero(preds[m] == 1)
         bars = [(x[i] - step_min, step_min) for i in idx]
         ax.broken_barh(bars, (row - 0.35, 0.7), facecolors=COLORS[m], edgecolor=SURFACE, linewidth=0.3)
-    ax.set_yticks(range(len(METHOD_ORDER)), [METHOD_LABELS[m] for m in METHOD_ORDER])
-    ax.set_ylim(-0.6, len(METHOD_ORDER) - 0.4)
+    ax.set_yticks(range(len(order)), [METHOD_LABELS[m] for m in order])
+    ax.set_ylim(-0.6, len(order) - 0.4)
     ax.invert_yaxis()
     ax.set_title("Alerts (window end time)")
     ax.set_xlabel("Minutes since start of test period")
@@ -568,23 +636,24 @@ def plot_timeline(test: pd.DataFrame, labels: pd.DataFrame, preds: dict[str, np.
 def plot_metrics(metrics: dict, path: Path) -> None:
     plt = _plt()
     names = ["precision", "recall", "f1"]
-    fig, ax = plt.subplots(figsize=(8, 4.2))
+    order = [m for m in METHOD_ORDER if m in metrics]
+    fig, ax = plt.subplots(figsize=(4 + 1.2 * len(order), 4.4))
     _style_axes(ax)
-    n = len(METHOD_ORDER)
+    n = len(order)
     width = 0.8 / n
     xs = np.arange(len(names))
-    for i, m in enumerate(METHOD_ORDER):
+    for i, m in enumerate(order):
         values = [metrics[m][k] for k in names]
         pos = xs - 0.4 + width * (i + 0.5)
         bars = ax.bar(pos, values, width=width * 0.92, color=COLORS[m], label=METHOD_LABELS[m])
         for b, v in zip(bars, values):
             ax.text(b.get_x() + b.get_width() / 2, v + 0.015, f"{v:.2f}", ha="center", va="bottom",
-                    fontsize=8, color=TEXT_SECONDARY)
+                    fontsize=8 if n <= 3 else 6.5, color=TEXT_SECONDARY)
     ax.set_xticks(xs, ["Precision", "Recall", "F1"])
     ax.set_ylim(0, 1.1)
     ax.set_ylabel("Score (test windows)")
     ax.set_title("Detection quality per method")
-    ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.1), ncol=n, fontsize=9)
+    ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.1), ncol=min(n, 3), fontsize=9)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -592,12 +661,12 @@ def plot_metrics(metrics: dict, path: Path) -> None:
 
 def plot_delays(delays: pd.DataFrame, methods: list[str], path: Path) -> None:
     plt = _plt()
-    fig, ax = plt.subplots(figsize=(8, 4.2))
+    order = [m for m in METHOD_ORDER if m in methods]
+    fig, ax = plt.subplots(figsize=(8, 1.6 + 0.85 * len(order)))
     _style_axes(ax)
     ax.grid(axis="x", color=GRID, linewidth=0.8)
     ax.grid(axis="y", visible=False)
     rng = np.random.default_rng(0)
-    order = [m for m in METHOD_ORDER if m in methods]
     labels = []
     for row, m in enumerate(order):
         if len(delays):

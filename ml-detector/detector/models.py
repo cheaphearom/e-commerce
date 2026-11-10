@@ -1,4 +1,4 @@
-"""The three detectors compared in the thesis.
+"""The detectors compared in the thesis.
 
 All share one interface:
 
@@ -12,7 +12,8 @@ features).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import itertools
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -53,7 +54,7 @@ class RuleBasedDetector:
     """
 
     name = "rules"
-    label = "Rule-based"
+    label = "Rule-based (default)"
 
     def __init__(self, config: RuleConfig | None = None, step: float = 10.0,
                  services: tuple[str, ...] = SERVICES):
@@ -95,6 +96,117 @@ class RuleBasedDetector:
     def fired_rules(self, X: pd.DataFrame) -> list[list[str]]:
         sustained = self.sustained_ratios(X)
         return [[name for name, v in row.items() if v > 1.0] for _, row in sustained.iterrows()]
+
+
+# ---------------------------------------------------------------------------------------
+# Rule tuning (training windows only)
+# ---------------------------------------------------------------------------------------
+RULE_TUNING_GRID: dict[str, tuple] = {
+    "consecutive": (1, 2, 3),
+    "gateway_5xx_ratio": (0.02, 0.05, 0.10),
+    "gateway_p95_ms": (1000.0, 2000.0, 3000.0),
+    "errors_per_service": (3.0, 5.0, 10.0),
+}
+
+
+def alert_episodes(pred: np.ndarray, starts: np.ndarray, step: float) -> list[tuple[int, int]]:
+    """Maximal runs of consecutive alerting windows as (first index, last index)."""
+    episodes = []
+    i, n = 0, len(pred)
+    while i < n:
+        if pred[i]:
+            j = i
+            while j + 1 < n and pred[j + 1] and abs(starts[j + 1] - starts[j] - step) <= step * 0.5:
+                j += 1
+            episodes.append((i, j))
+            i = j + 1
+        else:
+            i += 1
+    return episodes
+
+
+def _f1(y: np.ndarray, pred: np.ndarray) -> float:
+    tp = int(np.sum((pred == 1) & (y == 1)))
+    fp = int(np.sum((pred == 1) & (y == 0)))
+    fn = int(np.sum((pred == 0) & (y == 1)))
+    return 2 * tp / (2 * tp + fp + fn) if tp else 0.0
+
+
+def tune_rules(X: pd.DataFrame, y: np.ndarray, step: float = 10.0, grid: dict[str, tuple] | None = None,
+               base: RuleConfig | None = None,
+               services: tuple[str, ...] = SERVICES) -> tuple[RuleConfig, pd.DataFrame]:
+    """Grid search of the rule thresholds and ``consecutive`` on **training windows only**.
+
+    Every combination of ``grid`` is scored by window-level F1 against ``y``. The best F1 wins;
+    ties go to fewer false-alarm episodes (alert runs without any anomalous window), and any
+    remaining tie to the first combination in grid order. Returns the chosen config and the
+    full grid table (one row per combination, best first).
+    """
+    grid = grid or RULE_TUNING_GRID
+    base = base or RuleConfig()
+    y = np.asarray(y, dtype=int)
+    if len(X) != len(y):
+        raise ValueError("X and y must have the same length")
+    starts = X["window_start"].to_numpy(dtype=float) if "window_start" in X else np.arange(len(X)) * step
+    keys = list(grid)
+    rows = []
+    for order, values in enumerate(itertools.product(*(grid[k] for k in keys))):
+        cfg = replace(base, **dict(zip(keys, values)))
+        pred = RuleBasedDetector(cfg, step=step, services=services).predict(X) if len(X) else np.zeros(0, int)
+        false_eps = sum(1 for a, b in alert_episodes(pred, starts, step) if y[a:b + 1].sum() == 0)
+        rows.append({**dict(zip(keys, values)), "f1": _f1(y, pred), "false_alarm_episodes": false_eps,
+                     "alerts": int(pred.sum()), "grid_order": order})
+    table = pd.DataFrame(rows).sort_values(["f1", "false_alarm_episodes", "grid_order"],
+                                           ascending=[False, True, True], kind="stable").reset_index(drop=True)
+    best = table.iloc[0]
+    chosen = {k: (int(best[k]) if k in ("consecutive", "min_requests") else float(best[k])) for k in keys}
+    return replace(base, **chosen), table
+
+
+class TunedRuleBasedDetector(RuleBasedDetector):
+    """The same rules with thresholds and ``consecutive`` chosen by :func:`tune_rules`.
+
+    ``fit`` needs the labels of the training windows; nothing else is learned.
+    """
+
+    name = "rules_tuned"
+    label = "Rule-based (tuned)"
+    consecutive_override: int | None = None
+
+    def __init__(self, step: float = 10.0, grid: dict[str, tuple] | None = None,
+                 services: tuple[str, ...] = SERVICES):
+        super().__init__(RuleConfig(), step=step, services=services)
+        self.grid = grid or RULE_TUNING_GRID
+        self.tuning_: dict = {}
+
+    def fit(self, X: pd.DataFrame, y: np.ndarray | None = None) -> "TunedRuleBasedDetector":
+        if y is None:
+            raise ValueError("rule tuning needs the labels of the training windows")
+        tuned, table = tune_rules(X, y, self.step, self.grid, services=self.services)
+        best = table.iloc[0]
+        self.config = tuned if self.consecutive_override is None else replace(
+            tuned, consecutive=self.consecutive_override)
+        self.tuning_ = {
+            "objective": "max window F1 on training windows; ties: fewer false-alarm episodes, then grid order",
+            "grid": {k: list(v) for k, v in self.grid.items()},
+            "candidates": int(len(table)),
+            "tied_best": int(((table["f1"] == best["f1"])
+                              & (table["false_alarm_episodes"] == best["false_alarm_episodes"])).sum()),
+            "train_windows": int(len(X)),
+            "train_f1": float(best["f1"]),
+            "train_false_alarm_episodes": int(best["false_alarm_episodes"]),
+            "selected": {k: getattr(tuned, k) for k in self.grid},
+            "top": table.head(10).drop(columns="grid_order").to_dict(orient="records"),
+        }
+        return self
+
+
+class TunedRuleK1Detector(TunedRuleBasedDetector):
+    """Tuned thresholds (from the same search) but alerting on a single window (``consecutive=1``)."""
+
+    name = "rules_tuned_k1"
+    label = "Rule-based (tuned, k=1)"
+    consecutive_override = 1
 
 
 def sustained_min(values: np.ndarray, k: int, starts: np.ndarray | None = None,
@@ -237,9 +349,13 @@ class RandomForestDetector:
         return pairs[:top] if top else pairs
 
 
-METHOD_ORDER = (RuleBasedDetector.name, IsolationForestDetector.name, RandomForestDetector.name)
+RULE_METHODS = (RuleBasedDetector.name, TunedRuleBasedDetector.name, TunedRuleK1Detector.name)
+ML_METHODS = (IsolationForestDetector.name, RandomForestDetector.name)
+METHOD_ORDER = RULE_METHODS + ML_METHODS
+# methods of the live detector (API, notifications); the tuned rules exist only in evaluations
+LIVE_METHODS = (RuleBasedDetector.name, IsolationForestDetector.name, RandomForestDetector.name)
 METHOD_LABELS = {
-    RuleBasedDetector.name: RuleBasedDetector.label,
-    IsolationForestDetector.name: IsolationForestDetector.label,
-    RandomForestDetector.name: RandomForestDetector.label,
+    cls.name: cls.label
+    for cls in (RuleBasedDetector, TunedRuleBasedDetector, TunedRuleK1Detector,
+                IsolationForestDetector, RandomForestDetector)
 }

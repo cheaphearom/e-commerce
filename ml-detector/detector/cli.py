@@ -15,17 +15,24 @@ from .synthetic import generate
 
 
 def _summary(results: dict) -> str:
-    lines = [f"{'method':<18}{'P':>7}{'R':>7}{'F1':>7}{'AUC':>7}{'FPR':>7}{'det.':>8}{'mean delay':>12}"]
-    for m in METHOD_ORDER:
+    lines = [f"{'method':<26}{'P':>7}{'R':>7}{'F1':>7}{'AUC':>7}{'FPR':>7}{'det.':>8}{'mean delay':>12}"]
+    for m in [m for m in METHOD_ORDER if m in results["metrics"]]:
         r, d = results["metrics"][m], results["detection_delay"][m]
         auc = f"{r['roc_auc']:.3f}" if r["roc_auc"] is not None else "-"
         delay = f"{d['mean_delay_s']:.1f}s" if d["mean_delay_s"] is not None else "-"
-        lines.append(f"{METHOD_LABELS[m]:<18}{r['precision']:>7.3f}{r['recall']:>7.3f}{r['f1']:>7.3f}{auc:>7}"
+        lines.append(f"{METHOD_LABELS[m]:<26}{r['precision']:>7.3f}{r['recall']:>7.3f}{r['f1']:>7.3f}{auc:>7}"
                      f"{r['false_positive_rate']:>7.3f}{d['detected']:>4}/{d['faults']:<3}{delay:>12}")
-    for m, c in results["comparison_vs_rules"].items():
-        saved = f"{c['mean_time_saved_s']:.1f}s" if c["mean_time_saved_s"] is not None else "-"
-        lines.append(f"{METHOD_LABELS[m]} vs rules: earlier={c['earlier']} same={c['same']} "
-                     f"later_or_missed={c['later_or_missed']} both_missed={c['both_missed']} mean_saved={saved}")
+    variants = results.get("comparison_vs_rule_variants") or {"rules": results["comparison_vs_rules"]}
+    for rule, per_ml in variants.items():
+        for m, c in per_ml.items():
+            saved = f"{c['mean_time_saved_s']:.1f}s" if c["mean_time_saved_s"] is not None else "-"
+            lines.append(f"{METHOD_LABELS[m]} vs {rule}: earlier={c['earlier']} same={c['same']} "
+                         f"later_or_missed={c['later_or_missed']} both_missed={c['both_missed']} mean_saved={saved}")
+    tuning = results.get("rule_tuning")
+    if tuning:
+        sel = ", ".join(f"{k}={v}" for k, v in tuning["selected"].items())
+        lines.append(f"tuned rules (training windows only): {sel} "
+                     f"(train F1 {tuning['train_f1']:.3f}, {tuning['train_false_alarm_episodes']} false-alarm episodes)")
     return "\n".join(lines)
 
 
@@ -33,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="detector", description="Log anomaly detection for the saga system")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    ev = sub.add_parser("evaluate", help="compare rules, Isolation Forest and Random Forest")
+    ev = sub.add_parser("evaluate", help="compare the rule variants, Isolation Forest and Random Forest")
     ev.add_argument("--logs", required=True, help="log directory (or a single log file)")
     ev.add_argument("--labels", required=True, help="labels.csv written by the experiment runner")
     ev.add_argument("--out", required=True, help="output folder for results.json, report.md and figures")
@@ -48,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--allow-incomplete", action="store_true",
                     help="evaluate an experiment that is still running or was interrupted")
     ev.add_argument("--json", action="store_true", help="print results.json instead of the summary")
+    ev.add_argument("--no-rule-tuning", action="store_true",
+                    help="only the default rules (skip rules_tuned and rules_tuned_k1)")
 
     sy = sub.add_parser("synth", help="generate synthetic logs (testing only, not for thesis results)")
     sy.add_argument("--out", required=True)
@@ -67,7 +76,8 @@ def main(argv: list[str] | None = None) -> int:
             results = evaluate_paths(args.logs, args.labels, out_dir=args.out, window=args.window, step=args.step,
                                      train_frac=args.train_frac, grace=args.grace, seed=args.seed,
                                      start=args.start, end=args.end, make_figures=not args.no_figures,
-                                     allow_incomplete=args.allow_incomplete)
+                                     allow_incomplete=args.allow_incomplete,
+                                     tune_rules=not args.no_rule_tuning)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
