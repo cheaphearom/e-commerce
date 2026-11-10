@@ -122,3 +122,48 @@ comparable; re-run `evaluate` with the same options.
 (earlier = ML alerted first or only ML detected), applied to the pooled faults; this keeps the
 single-run report and the summary consistent. Pooled counts equal the sum of the per-run counts
 (tested).
+
+## Part 4 – Statistical tests (`detector/stats.py`)
+
+**D23. Clusters for the F1 bootstrap.** `evaluate` now also writes `window_predictions.csv`
+(label, fault, cluster, score and alert of every method for every test window). A window's
+cluster is the most recent fault that started before the window ended: the fault plus the
+normal gap that follows it (windows before the first fault form a cluster `pre`). Resampling
+these clusters keeps the strongly correlated neighbouring windows together and keeps each fault
+with the false alarms that follow it, which window-level resampling would not.
+
+**D24. Resampling is stratified by run.** Clusters (for F1) and faults (for delays) are
+resampled with replacement inside each run, so every resample has the same mix of runs as the
+data. All methods use the same resamples (paired). 2,000 resamples, seed 42, percentile
+intervals. The F1 point estimate is the pooled F1 of all test windows (micro average), which
+can differ slightly from the mean of per-run F1 in `summary_metrics.md`.
+
+**D25. Fallback for older runs.** If a run has no `window_predictions.csv` (evaluated before
+this change), the F1 interval resamples runs (mean of per-run F1) and the table says so.
+Re-running `evaluate` restores the cluster bootstrap.
+
+**D26. Mean-delay interval.** Faults are resampled within runs; the statistic is the mean
+delay of the detected faults in the resample, so a change in the detection rate does not
+masquerade as a change in delay.
+
+**D27. McNemar, exact version.** Only discordant faults (detected by exactly one method)
+carry information; the p-value is the two-sided binomial test of `ml_only` out of
+`ml_only + rule_only` at 0.5. With fewer than 6 discordant faults the test is not run.
+
+**D28. Wilcoxon details.** Differences are rule − ML (positive = ML earlier). Pairs with a
+zero difference (both alerted on the same window) are dropped (Wilcoxon's original method), so
+`n` is the number of non-zero pairs, and both `n` and the number of faults detected by both are
+reported. Delays are multiples of the 10 s step, so ties are frequent and the exact
+distribution does not apply; p and Z come from the normal approximation with tie correction and
+no continuity correction. Effect size r = |Z| / √n (0.1 small, 0.3 medium, 0.5 large). With
+fewer than 6 non-zero pairs the test is not run.
+
+**D29. Which comparisons and Holm family.** Each ML model is compared with each tuned rule
+variant (`rules_tuned`, `rules_tuned_k1`), for detection (McNemar) and delay (Wilcoxon); all
+tests that were run form one Holm family. If `rules_tuned_k1` produced exactly the same
+per-fault results as `rules_tuned` (the search already chose k = 1), its tests are exact
+duplicates and are not repeated, so they do not inflate the correction; `stats.md` says so.
+
+**D30. Hypothesis wording.** Delay tests are reported as H3₀ (no difference in detection
+delay). Detection tests are reported as "H₀ (no difference in per-fault detection)", since the
+thesis hypotheses do not name one; rename it in `stats.hypothesis_line` if needed.

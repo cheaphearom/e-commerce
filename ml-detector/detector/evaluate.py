@@ -10,8 +10,8 @@ Pipeline
      on the training windows only), score the test windows
   5. metrics (Q1/Q2), per-fault detection delay and comparison with the rules (Q3)
 
-Outputs in ``out_dir``: results.json, report.md, detection_delays.csv, timeline.png,
-metrics.png, detection_delay.png.
+Outputs in ``out_dir``: results.json, report.md, detection_delays.csv, window_predictions.csv,
+timeline.png, metrics.png, detection_delay.png.
 """
 from __future__ import annotations
 
@@ -191,6 +191,30 @@ def detection_delays(test: pd.DataFrame, labels: pd.DataFrame, preds: dict[str, 
     return pd.DataFrame(rows, columns=columns)
 
 
+def window_clusters(test: pd.DataFrame, labels: pd.DataFrame) -> np.ndarray:
+    """Cluster of each test window for the cluster bootstrap: the most recent fault that started
+    before the window ended (the fault plus the normal gap after it). Windows before the first
+    fault form the cluster ``"pre"``."""
+    we = test["window_end"].to_numpy(dtype=float)
+    if labels.empty:
+        return np.full(len(test), "pre", dtype=object)
+    lab = labels.sort_values("start")
+    starts = np.array([t.timestamp() for t in lab["start"]])
+    ids = lab["fault_id"].astype(str).to_numpy()
+    pos = np.searchsorted(starts, we, side="left") - 1
+    return np.where(pos >= 0, ids[np.clip(pos, 0, None)], "pre").astype(object)
+
+
+def window_predictions(test: pd.DataFrame, labels: pd.DataFrame, scores: dict, preds: dict) -> pd.DataFrame:
+    """Per test window: label, fault, bootstrap cluster and every method's score and alert."""
+    out = test[["window_start", "window_end", "label", "fault_id"]].copy()
+    out["cluster"] = window_clusters(test, labels)
+    for m in scores:
+        out[f"{m}_score"] = scores[m]
+        out[f"{m}_pred"] = preds[m]
+    return out
+
+
 def delay_summary(delays: pd.DataFrame, method: str) -> dict:
     n = len(delays)
     if n == 0:
@@ -336,6 +360,7 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
         out.mkdir(parents=True, exist_ok=True)
         (out / "results.json").write_text(json.dumps(_json_safe(results), indent=2), encoding="utf-8")
         delays.to_csv(out / "detection_delays.csv", index=False)
+        window_predictions(test, labels, scores, preds).to_csv(out / "window_predictions.csv", index=False)
         (out / "report.md").write_text(render_report(results, delays), encoding="utf-8")
         if make_figures:
             plot_timeline(test, labels, preds, ds.t_split, grace, out / "timeline.png")

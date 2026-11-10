@@ -69,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     ag.add_argument("--out", required=True, help="output folder for the summary tables and figures")
     ag.add_argument("--detector-dir", default="detector", help="evaluation sub-folder inside each run")
     ag.add_argument("--no-figures", action="store_true")
+    ag.add_argument("--bootstrap", type=int, default=2000, help="bootstrap resamples for the confidence intervals")
+    ag.add_argument("--seed", type=int, default=42, help="seed of the bootstrap")
 
     sy = sub.add_parser("synth", help="generate synthetic logs (testing only, not for thesis results)")
     sy.add_argument("--out", required=True)
@@ -100,11 +102,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "aggregate":
         try:
             result = aggregate(args.runs, args.out, make_figures=not args.no_figures,
-                               detector_dir=args.detector_dir)
+                               detector_dir=args.detector_dir, n_boot=args.bootstrap, seed=args.seed)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
         print((Path(args.out) / "summary_metrics.md").read_text(encoding="utf-8"))
+        hypotheses = (Path(args.out) / "stats.md").read_text(encoding="utf-8").split("## Hypotheses")[1]
+        print("Hypotheses" + hypotheses.split("\n## ")[0])
         print(f"{len(result['runs'])} runs aggregated, written to {args.out}", file=sys.stderr)
         return 0
     if args.command == "synth":

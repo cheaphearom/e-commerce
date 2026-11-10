@@ -10,6 +10,9 @@ Outputs in ``out_dir``:
   pooled_delays.csv           one row per test-period fault x method, from every run
   summary_q3.md               pooled detection rate and delays, earlier / same / later
                               counts against each rule variant, by fault type and severity
+  stats.md, stats_tests.csv    McNemar / Wilcoxon tests (Holm-corrected) and plain-English
+                              lines per hypothesis, see :mod:`detector.stats`
+  ci_f1.csv, ci_delay.csv     95 % cluster-bootstrap confidence intervals
   f1_by_method.png, pooled_delays.png, detection_rate_by_type.png   (300 dpi)
 """
 from __future__ import annotations
@@ -25,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from .evaluate import COLORS, GRID, SURFACE, TEXT, TEXT_SECONDARY, _fmt, _plt, _style_axes, compare_with_rules
+from . import stats as st
 from .models import METHOD_LABELS, METHOD_ORDER, ML_METHODS, RULE_METHODS
 
 METRICS = (("precision", "Precision"), ("recall", "Recall"), ("f1", "F1"), ("roc_auc", "ROC-AUC"),
@@ -40,6 +44,7 @@ class Run:
     path: Path
     results: dict
     delays: pd.DataFrame          # wide, as written by ``evaluate`` (one row per fault)
+    windows: pd.DataFrame | None = None   # window_predictions.csv (older runs may lack it)
 
     @property
     def methods(self) -> list[str]:
@@ -75,7 +80,9 @@ def load_run(path: str | os.PathLike, detector_dir: str = "detector") -> Run:
                              f"for this run first")
     results = json.loads(res_path.read_text(encoding="utf-8"))
     delays = pd.read_csv(delays_path, dtype={"fault_id": str})
-    return Run(run_id=path.name, path=path, results=results, delays=delays)
+    win_path = path / detector_dir / "window_predictions.csv"
+    windows = pd.read_csv(win_path, dtype={"fault_id": str, "cluster": str}) if win_path.exists() else None
+    return Run(run_id=path.name, path=path, results=results, delays=delays, windows=windows)
 
 
 def load_runs(patterns: list[str], detector_dir: str = "detector") -> list[Run]:
@@ -395,8 +402,20 @@ def plot_rate_by_type(long: pd.DataFrame, methods: list[str], path: Path) -> Non
 # ---------------------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------------------
+def statistics(runs: list[Run], wide: pd.DataFrame, n_boot: int = st.N_BOOT, seed: int = st.SEED) -> dict:
+    """Confidence intervals and paired tests (see :mod:`detector.stats`)."""
+    methods = methods_of(runs)
+    if all(r.windows is not None for r in runs):
+        windows = pd.concat([r.windows.assign(run_id=r.run_id) for r in runs], ignore_index=True, sort=False)
+        f1_ci = st.f1_cluster_ci(windows, methods, n_boot, seed)
+    else:
+        f1_ci = st.f1_run_ci(per_run_metrics(runs), methods, n_boot, seed)
+    return {"f1_ci": f1_ci, "delay_ci": st.delay_ci(wide, methods, n_boot, seed),
+            "tests": st.paired_tests(wide, methods)}
+
+
 def aggregate(run_patterns: list[str], out_dir: str | os.PathLike, make_figures: bool = True,
-              detector_dir: str = "detector") -> dict:
+              detector_dir: str = "detector", n_boot: int = st.N_BOOT, seed: int = st.SEED) -> dict:
     """Loads every run, writes the summary tables and figures, and returns the main tables."""
     runs = load_runs(run_patterns, detector_dir)
     out = Path(out_dir)
@@ -412,10 +431,17 @@ def aggregate(run_patterns: list[str], out_dir: str | os.PathLike, make_figures:
     long.to_csv(out / "pooled_delays.csv", index=False)
     (out / "summary_q3.md").write_text(render_q3(runs, wide, long), encoding="utf-8")
 
+    stat = statistics(runs, wide, n_boot, seed)
+    stat["f1_ci"].to_csv(out / "ci_f1.csv", index=False)
+    stat["delay_ci"].to_csv(out / "ci_delay.csv", index=False)
+    stat["tests"].to_csv(out / "stats_tests.csv", index=False)
+    (out / "stats.md").write_text(st.render_stats(stat["f1_ci"], stat["delay_ci"], stat["tests"], len(runs),
+                                                  n_boot, seed), encoding="utf-8")
+
     if make_figures:
         plot_f1(runs, summary, out / "f1_by_method.png")
         plot_pooled_delays(long, methods, out / "pooled_delays.png")
         plot_rate_by_type(long, methods, out / "detection_rate_by_type.png")
     return {"runs": [r.run_id for r in runs], "methods": methods, "summary": summary,
-            "pooled_delays": long, "comparisons": pooled_comparisons(wide, methods),
+            "pooled_delays": long, "comparisons": pooled_comparisons(wide, methods), **stat,
             "outputs": sorted(p.name for p in out.iterdir() if p.is_file())}
