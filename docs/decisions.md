@@ -90,3 +90,35 @@ its previous three methods unless `methods` or `tune_rules` is given, and the li
 
 **D15. SciPy pinned to 1.14.1.** scikit-learn 1.5.2 with SciPy 1.18 warns about an unknown
 lbfgs option in Logistic Regression; 1.14.1 is the release that matches the pinned scikit-learn.
+
+## Part 3 – Aggregating several runs
+
+**D16. Standard deviation over runs is the sample SD (ddof = 1).** The five runs are a sample of
+possible experiments, not the whole population. With one run no SD is shown. A metric that is
+undefined in a run (ROC-AUC without both classes) is left out of that method's mean, and the
+`runs` column shows how many runs each method has.
+
+**D17. Two kinds of summary, on purpose.** `summary_metrics` averages the per-run window metrics
+(each run counts equally, whatever its number of windows). `summary_q3` **pools** the faults of
+all runs (each fault counts equally), because a 3-hour run has only about 12 test-period faults,
+too few for stable per-run delay statistics.
+
+**D18. Fault identity is (run_id, fault_id).** Fault ids restart in every run (`F001`, …), so
+`pooled_delays.csv` keeps `run_id`; the run id is the folder name (`run_3`).
+
+**D19. Severity comes from the label's `params` JSON** (`{"severity": "low", …}`, written by the
+experiment runner). Labels without it are grouped as `unknown`, never guessed.
+
+**D20. Missing methods stay missing.** If a method was not evaluated in some run (e.g. an older
+results folder, or `--methods`), its rows are absent for that run; they are not counted as
+missed faults. Rule comparisons use only faults from runs where both methods were evaluated,
+and the table states the number of faults compared.
+
+**D21. Runs must share their evaluation settings.** `aggregate` refuses runs evaluated with a
+different window, step, train fraction or grace period, because their metrics are not
+comparable; re-run `evaluate` with the same options.
+
+**D22. Earlier / same / later uses the existing per-fault rule** of `compare_with_rules`
+(earlier = ML alerted first or only ML detected), applied to the pooled faults; this keeps the
+single-run report and the summary consistent. Pooled counts equal the sum of the per-run counts
+(tested).

@@ -2,13 +2,16 @@
 
     python -m detector.cli evaluate --logs ../logs --labels ../results/labels.csv --out ../results/eval
     python -m detector.cli synth --out ./synthetic --duration-min 120 --seed 1
+    python -m detector.cli aggregate --runs ../results/run_* --out ../results/summary
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from pathlib import Path
 
+from .aggregate import aggregate
 from .evaluate import evaluate_paths
 from .models import METHOD_LABELS, METHOD_ORDER
 from .synthetic import generate
@@ -60,6 +63,13 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--methods", help=f"comma-separated subset of: {', '.join(METHOD_ORDER)} "
                                       f"(default: all; the default rules are always included)")
 
+    ag = sub.add_parser("aggregate", help="summarise several evaluated runs (mean ± SD, pooled delays)")
+    ag.add_argument("--runs", nargs="+", required=True,
+                    help="run folders or glob patterns, each with detector/results.json and detection_delays.csv")
+    ag.add_argument("--out", required=True, help="output folder for the summary tables and figures")
+    ag.add_argument("--detector-dir", default="detector", help="evaluation sub-folder inside each run")
+    ag.add_argument("--no-figures", action="store_true")
+
     sy = sub.add_parser("synth", help="generate synthetic logs (testing only, not for thesis results)")
     sy.add_argument("--out", required=True)
     sy.add_argument("--duration-min", type=float, default=120.0)
@@ -86,6 +96,16 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(json.dumps(results, indent=2, default=str) if args.json else _summary(results))
         print(f"\nwritten to {args.out}", file=sys.stderr)
+        return 0
+    if args.command == "aggregate":
+        try:
+            result = aggregate(args.runs, args.out, make_figures=not args.no_figures,
+                               detector_dir=args.detector_dir)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print((Path(args.out) / "summary_metrics.md").read_text(encoding="utf-8"))
+        print(f"{len(result['runs'])} runs aggregated, written to {args.out}", file=sys.stderr)
         return 0
     if args.command == "synth":
         meta = generate(args.out, duration_min=args.duration_min, warmup_min=args.warmup_min, rps=args.rps,
