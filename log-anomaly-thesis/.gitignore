@@ -1,0 +1,7 @@
+# data is downloaded / regenerated, never committed
+data/raw/
+data/processed/
+logs/
+.venv/
+# the repo root ignores results/; thesis outputs here ARE committed
+!results/

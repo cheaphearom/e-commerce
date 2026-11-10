@@ -1,0 +1,66 @@
+# Central configuration for the log anomaly detection experiments.
+# Every script reads this file; change values here, not in code.
+
+seed: 42                      # global seed (bootstrap, sampling, anything not seed-swept)
+experiment_seeds: [0, 1, 2, 3, 4]   # 5 seeds for the ML models
+
+paths:
+  raw: data/raw
+  processed: data/processed
+  results: results
+
+download:
+  base_url: "https://zenodo.org/records/8196385/files"
+  files: [HDFS_v1.zip, BGL.zip]
+
+datasets:
+  HDFS:
+    log_file: data/raw/HDFS_v1/HDFS.log
+    label_file: data/raw/HDFS_v1/preprocessed/anomaly_label.csv
+  BGL:
+    log_file: data/raw/BGL/BGL.log
+
+# R1 / R2 / R3 keyword list. Matching is case-sensitive (the list already
+# contains both "Exception" and "exception"). "fail" also matches "failed"/"failure".
+keywords: [ERROR, FATAL, SEVERE, Exception, exception, fail, failed, failure, timeout, refused, interrupt]
+
+parsing:
+  chunk_lines: 500000         # lines per chunk while parsing (memory bound)
+  drain_sim_th: 0.4           # Drain3 similarity threshold (Drain3 default)
+  drain_depth: 4              # Drain3 parse-tree depth (Drain3 default)
+
+windowing:
+  BGL:
+    window_s: 60              # main setting
+    step_s: 10
+    sensitivity_window_s: 300 # sensitivity check
+
+split:                        # chronological, never shuffled
+  train: 0.6
+  val: 0.2
+  test: 0.2
+  # Drop samples whose log lines cross into the next period (strictly leak-free).
+  # Matters for HDFS: blocks live up to 15 h, so many cross a boundary.
+  drop_crossing: true
+
+features:
+  tfidf: false                # true = TF-IDF weighting of event counts
+
+grids:
+  IF:  {n_estimators: [100, 200], max_samples: [256, "auto"]}
+  PCA: {variance: [0.90, 0.95]}
+  LR:  {C: [0.1, 1, 10]}
+  RF:  {n_estimators: [100, 300], max_depth: [null, 20]}
+
+stats:
+  bootstrap: 30
+  alpha: 0.05
+
+rq3:
+  incident_gap_s: 300         # merge anomalous lines closer than this into one incident
+  pre_tolerance_s: 600        # alert up to 10 min before incident start still counts as detection
+  early_warning_horizon_s: 3600   # alerts in [start-60min, start-10min) = early-warning candidates
+  alert_cooldown_s: 60        # repeated alerts within 60 s are one alert (for false alerts/hour)
+  robustness:
+    window_s: 300
+    incident_gap_s: 60
