@@ -147,7 +147,7 @@ def test_custom_grid_and_disabling_tuning(synthetic_run):
     assert res["rule_tuning"]["candidates"] == 2
     assert res["config"]["rules_tuned"]["consecutive"] == 1
     plain = evaluate(logs, labels, make_figures=False, tune_rules=False)
-    assert set(plain["metrics"]) == {"rules", "isolation_forest", "random_forest"}
+    assert set(plain["metrics"]) == {"rules", *ML_METHODS}
     assert plain["rule_tuning"] is None
     assert set(plain["comparison_vs_rule_variants"]) == {"rules"}
 
@@ -157,7 +157,7 @@ def test_cli_flag_skips_rule_tuning(synthetic_run, tmp_path, capsys):
     code = cli_main(["evaluate", "--logs", str(synthetic_run / "logs"), "--labels",
                      str(synthetic_run / "labels.csv"), "--out", str(out), "--no-figures", "--no-rule-tuning"])
     assert code == 0
-    assert set(json.loads((out / "results.json").read_text())["metrics"]) == set(LIVE_METHODS)
+    assert set(json.loads((out / "results.json").read_text())["metrics"]) == {"rules", *ML_METHODS}
     code = cli_main(["evaluate", "--logs", str(synthetic_run / "logs"), "--labels",
                      str(synthetic_run / "labels.csv"), "--out", str(out), "--no-figures"])
     assert code == 0

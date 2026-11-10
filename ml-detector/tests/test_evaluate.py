@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from detector.evaluate import alert_episodes, compare_with_rules, evaluate_paths, prepare_dataset
-from detector.models import METHOD_ORDER
+from detector.models import METHOD_ORDER, ML_METHODS
 from detector.parsing import load_labels, load_logs
 
 
@@ -36,7 +36,7 @@ def test_full_evaluation_on_synthetic_logs(synthetic_run, tmp_path):
 
     report = (out / "report.md").read_text()
     assert "Q1 / Q2" in report and "Q3" in report
-    assert set(results["comparison_vs_rules"]) == {"isolation_forest", "random_forest"}
+    assert set(results["comparison_vs_rules"]) == set(ML_METHODS)
 
 
 def test_split_is_chronological_without_overlap(synthetic_run):

@@ -45,7 +45,7 @@ from .features import (
     SERVICES, add_unseen_templates, build_windows, feature_name, in_fault_mask, known_templates,
     label_windows, system_name,
 )
-from .models import LIVE_METHODS, IsolationForestDetector, RandomForestDetector, RuleBasedDetector
+from .models import LIVE_METHODS, RULE_METHODS, IsolationForestDetector, RandomForestDetector, RuleBasedDetector
 from .notify import IncidentNotifier, TelegramSender
 from .parsing import LogTailer, empty_logs, load_experiment_meta, load_labels, load_logs
 
@@ -104,6 +104,8 @@ class EvaluateRequest(BaseModel):
     make_figures: bool = True
     allow_incomplete: bool = False
     tune_rules: bool = Field(False, description="also evaluate the tuned rule variants (rules_tuned, rules_tuned_k1)")
+    methods: list[str] | None = Field(None, description="methods to evaluate; default: the live detector's "
+                                                        "three methods (plus the tuned rules with tune_rules)")
 
 
 class DetectorState:
@@ -381,7 +383,8 @@ def create_app(settings: Settings | None = None, send=None) -> FastAPI:
                 grace=request.grace if request.grace is not None else settings.grace,
                 seed=request.seed if request.seed is not None else settings.seed,
                 start=request.start, end=request.end, make_figures=request.make_figures,
-                tune_rules=request.tune_rules,
+                tune_rules=request.tune_rules or bool(request.methods),
+                methods=request.methods or (list(LIVE_METHODS) + (list(RULE_METHODS) if request.tune_rules else [])),
                 allow_incomplete=request.allow_incomplete)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e

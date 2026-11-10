@@ -1,4 +1,4 @@
-"""Offline evaluation: rule variants vs Isolation Forest vs Random Forest.
+"""Offline evaluation: rule variants vs Isolation Forest, Random Forest, PCA and Logistic Regression.
 
 Pipeline
   1. parse logs, build 30 s / 10 s sliding windows, label windows that overlap
@@ -30,8 +30,9 @@ from .features import (
     label_windows,
 )
 from .models import (
-    METHOD_LABELS, METHOD_ORDER, ML_METHODS, RULE_METHODS, IsolationForestDetector, RandomForestDetector,
-    RuleBasedDetector, TunedRuleBasedDetector, TunedRuleK1Detector, alert_episodes,
+    METHOD_LABELS, METHOD_ORDER, ML_METHODS, RULE_METHODS, IsolationForestDetector, LogisticRegressionDetector,
+    PCADetector, RandomForestDetector, RuleBasedDetector, TunedRuleBasedDetector, TunedRuleK1Detector,
+    alert_episodes,
 )
 from .parsing import load_experiment_meta, load_labels, load_logs
 
@@ -42,6 +43,8 @@ COLORS = {
     RandomForestDetector.name: "#1baf7a",
     TunedRuleBasedDetector.name: "#eda100",
     TunedRuleK1Detector.name: "#6250d6",
+    PCADetector.name: "#008300",
+    LogisticRegressionDetector.name: "#e87ba4",
 }
 SURFACE = "#fcfcfb"
 TEXT = "#0b0b0b"
@@ -97,19 +100,35 @@ def prepare_dataset(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30
                    known_templates=known, window=window, step=step, grace=grace)
 
 
-def make_detectors(step: float, seed: int, tune_rules: bool = True, rule_grid: dict | None = None) -> dict:
-    """Every compared method, in :data:`METHOD_ORDER`.
+def select_methods(methods=None, tune_rules: bool = True) -> list[str]:
+    """Methods to evaluate, in :data:`METHOD_ORDER`.
 
-    With ``tune_rules=False`` only the default rules, Isolation Forest and Random Forest are
-    returned (the original three-method comparison).
+    ``methods=None`` means every method. The default rules are always included (every
+    comparison is made against them); ``tune_rules=False`` removes the tuned rule variants.
     """
-    detectors = {RuleBasedDetector.name: RuleBasedDetector(step=step)}
-    if tune_rules:
-        detectors[TunedRuleBasedDetector.name] = TunedRuleBasedDetector(step=step, grid=rule_grid)
-        detectors[TunedRuleK1Detector.name] = TunedRuleK1Detector(step=step, grid=rule_grid)
-    detectors[IsolationForestDetector.name] = IsolationForestDetector(random_state=seed)
-    detectors[RandomForestDetector.name] = RandomForestDetector(random_state=seed)
-    return detectors
+    wanted = set(METHOD_ORDER if methods is None else methods)
+    unknown = wanted - set(METHOD_ORDER)
+    if unknown:
+        raise ValueError(f"unknown method(s): {', '.join(sorted(unknown))}; choose from {', '.join(METHOD_ORDER)}")
+    wanted.add(RuleBasedDetector.name)
+    if not tune_rules:
+        wanted -= {TunedRuleBasedDetector.name, TunedRuleK1Detector.name}
+    return [m for m in METHOD_ORDER if m in wanted]
+
+
+def make_detectors(step: float, seed: int, tune_rules: bool = True, rule_grid: dict | None = None,
+                   methods=None) -> dict:
+    """The compared detectors, in :data:`METHOD_ORDER` (see :func:`select_methods`)."""
+    factories = {
+        RuleBasedDetector.name: lambda: RuleBasedDetector(step=step),
+        TunedRuleBasedDetector.name: lambda: TunedRuleBasedDetector(step=step, grid=rule_grid),
+        TunedRuleK1Detector.name: lambda: TunedRuleK1Detector(step=step, grid=rule_grid),
+        IsolationForestDetector.name: lambda: IsolationForestDetector(random_state=seed),
+        RandomForestDetector.name: lambda: RandomForestDetector(random_state=seed),
+        PCADetector.name: lambda: PCADetector(percentile=IsolationForestDetector().percentile),
+        LogisticRegressionDetector.name: lambda: LogisticRegressionDetector(random_state=seed),
+    }
+    return {m: factories[m]() for m in select_methods(methods, tune_rules)}
 
 
 # ---------------------------------------------------------------------------------------
@@ -235,7 +254,8 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
              train_frac: float = 0.6, grace: float = 15.0, seed: int = 42,
              start: pd.Timestamp | None = None, end: pd.Timestamp | None = None,
              out_dir: str | os.PathLike | None = None, meta: dict | None = None,
-             make_figures: bool = True, tune_rules: bool = True, rule_grid: dict | None = None) -> dict:
+             make_figures: bool = True, tune_rules: bool = True, rule_grid: dict | None = None,
+             methods=None) -> dict:
     """Runs the full comparison and (optionally) writes every output file to ``out_dir``."""
     if labels.empty:
         raise ValueError("labels are empty - the evaluation needs at least one injected fault")
@@ -247,7 +267,7 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
     if len(test) == 0:
         raise ValueError("no test windows - decrease --train-frac")
 
-    detectors = make_detectors(step, seed, tune_rules=tune_rules, rule_grid=rule_grid)
+    detectors = make_detectors(step, seed, tune_rules=tune_rules, rule_grid=rule_grid, methods=methods)
     y_train = train["label"].to_numpy()
     for det in detectors.values():
         det.fit(train, y_train)
@@ -270,17 +290,12 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
     comparison_variants = {r: {m: compare_with_rules(delays, m, rule=r) for m in ml_methods}
                            for r in rule_methods}
 
-    rf: RandomForestDetector = detectors[RandomForestDetector.name]
-    iso: IsolationForestDetector = detectors[IsolationForestDetector.name]
     results = {
         "config": {
             "window_s": window, "step_s": step, "train_frac": train_frac, "grace_s": grace, "seed": seed,
-            "rules": vars(detectors[RuleBasedDetector.name].config) | {},
-            **{r: vars(detectors[r].config) | {} for r in rule_methods if r != RuleBasedDetector.name},
-            "isolation_forest": {"n_estimators": iso.n_estimators, "percentile": iso.percentile,
-                                 "threshold": iso.threshold_, "features": iso.columns_},
-            "random_forest": {"n_estimators": rf.n_estimators, "class_weight": "balanced",
-                              "threshold": rf.threshold},
+            "methods": list(detectors),
+            **{r: vars(detectors[r].config) | {} for r in rule_methods},
+            **{m: model_config(detectors[m]) for m in ml_methods},
         },
         "dataset": {
             "log_records": int(len(logs)),
@@ -303,10 +318,17 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
         "detection_delay": delay_stats,
         "comparison_vs_rules": comparison,
         "comparison_vs_rule_variants": comparison_variants,
-        "rule_tuning": detectors[TunedRuleBasedDetector.name].tuning_ if tune_rules else None,
+        "rule_tuning": (detectors[TunedRuleBasedDetector.name].tuning_
+                        if TunedRuleBasedDetector.name in detectors else None),
         "by_fault_type": breakdown(delays, "type", methods) if len(delays) else {},
         "by_service": breakdown(delays, "service", methods) if len(delays) else {},
-        "feature_importance": [{"feature": f, "importance": v} for f, v in rf.feature_importance(top=20)],
+        "feature_importance": ([{"feature": f, "importance": v}
+                                for f, v in detectors[RandomForestDetector.name].feature_importance(top=20)]
+                               if RandomForestDetector.name in detectors else []),
+        "logistic_regression_coefficients": (
+            [{"feature": f, "coefficient": v}
+             for f, v in detectors[LogisticRegressionDetector.name].coefficients(top=20)]
+            if LogisticRegressionDetector.name in detectors else []),
     }
 
     if out_dir is not None:
@@ -323,11 +345,28 @@ def evaluate(logs: pd.DataFrame, labels: pd.DataFrame, window: float = 30.0, ste
     return results
 
 
+def model_config(det) -> dict:
+    """Settings and learned thresholds of an ML detector, for ``results.json``."""
+    if isinstance(det, IsolationForestDetector):
+        return {"n_estimators": det.n_estimators, "percentile": det.percentile, "threshold": det.threshold_,
+                "features": det.columns_}
+    if isinstance(det, RandomForestDetector):
+        return {"n_estimators": det.n_estimators, "class_weight": "balanced", "threshold": det.threshold}
+    if isinstance(det, PCADetector):
+        return {"variance": det.variance, "n_components": det.n_components_,
+                "explained_variance": det.explained_variance_, "percentile": det.percentile,
+                "threshold": det.threshold_, "features": det.columns_}
+    if isinstance(det, LogisticRegressionDetector):
+        return {"C": det.C, "class_weight": "balanced", "threshold": det.threshold,
+                "preprocessing": "log1p + StandardScaler", "features": len(det.columns_)}
+    return {}
+
+
 def evaluate_paths(logs_path: str | os.PathLike, labels_path: str | os.PathLike, out_dir=None,
                    window: float = 30.0, step: float = 10.0, train_frac: float = 0.6, grace: float = 15.0,
                    seed: int = 42, start: str | None = None, end: str | None = None,
                    make_figures: bool = True, allow_incomplete: bool = False, tune_rules: bool = True,
-                   rule_grid: dict | None = None) -> dict:
+                   rule_grid: dict | None = None, methods=None) -> dict:
     """Loads logs and labels from disk and runs :func:`evaluate`.
 
     If ``experiment.json`` lies next to ``labels.csv``, the evaluation period defaults to the
@@ -357,7 +396,7 @@ def evaluate_paths(logs_path: str | os.PathLike, labels_path: str | os.PathLike,
     logs = load_logs(logs_path, start=start_ts, end=end_ts)
     return evaluate(logs, labels, window=window, step=step, train_frac=train_frac, grace=grace, seed=seed,
                     out_dir=out_dir, meta=meta, make_figures=make_figures, tune_rules=tune_rules,
-                    rule_grid=rule_grid)
+                    rule_grid=rule_grid, methods=methods)
 
 
 def _utc(ts: pd.Timestamp | None) -> pd.Timestamp | None:
@@ -421,7 +460,22 @@ def render_rule_variants(results: dict) -> list[str]:
                   f"({tuning['tied_best']} combination(s) tied on both). "
                   "`Rule-based (tuned, k=1)` uses the same thresholds with `consecutive = 1`, "
                   "so it alerts on a single window like the ML models.",
-                  "", "Best grid points on the training windows:", "",
+                  ""]
+        edges = tuning.get("grid_edge") or []
+        if edges:
+            lines.append("**Grid-edge check:** the chosen value is on the edge of the grid, and the next value "
+                         "inward is worse on the training windows, so a better setting may lie outside the grid. "
+                         "Consider extending the grid in this direction:")
+            lines.append("")
+            for e in edges:
+                lines.append(f"- `{e['parameter']}` = {e['value']:g} ({e['edge']} edge): training F1 {e['f1']:.3f} "
+                             f"vs {e['neighbour_f1']:.3f} at {e['neighbour']:g}; false-alarm episodes "
+                             f"{e['false_alarm_episodes']} vs {e['neighbour_false_alarm_episodes']}")
+        else:
+            lines.append("**Grid-edge check:** passed – no tuned parameter is limited by the edge of the grid "
+                         "(edges where the neighbouring value scores the same are not flagged; "
+                         "`consecutive = 1` is the natural minimum).")
+        lines += ["", "Best grid points on the training windows:", "",
                   "| consecutive | 5xx ratio | p95 (ms) | ERROR lines | Train F1 | False-alarm episodes | Alerting windows |",
                   "|---:|---:|---:|---:|---:|---:|---:|"]
         for r in tuning["top"]:
@@ -530,9 +584,16 @@ def render_report(results: dict, delays: pd.DataFrame) -> str:
     if any(m in results["metrics"] for m in RULE_METHODS[1:]):
         lines += render_rule_variants(results)
 
-    lines += ["", "## Random Forest feature importance (top 20)", "", "| Feature | Importance |", "|---|---:|"]
-    for item in results["feature_importance"]:
-        lines.append(f"| `{item['feature']}` | {item['importance']:.4f} |")
+    if results["feature_importance"]:
+        lines += ["", "## Random Forest feature importance (top 20)", "", "| Feature | Importance |", "|---|---:|"]
+        for item in results["feature_importance"]:
+            lines.append(f"| `{item['feature']}` | {item['importance']:.4f} |")
+    if results.get("logistic_regression_coefficients"):
+        lines += ["", "## Logistic Regression coefficients (top 20 by size)", "",
+                  "Coefficients on standardised log1p features; positive = pushes towards anomalous.", "",
+                  "| Feature | Coefficient |", "|---|---:|"]
+        for item in results["logistic_regression_coefficients"]:
+            lines.append(f"| `{item['feature']}` | {item['coefficient']:+.3f} |")
 
     if len(delays):
         lines += ["", "## Per-fault detection delays", "",

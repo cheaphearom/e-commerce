@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="detector", description="Log anomaly detection for the saga system")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    ev = sub.add_parser("evaluate", help="compare the rule variants, Isolation Forest and Random Forest")
+    ev = sub.add_parser("evaluate", help="compare the rule variants and the ML models")
     ev.add_argument("--logs", required=True, help="log directory (or a single log file)")
     ev.add_argument("--labels", required=True, help="labels.csv written by the experiment runner")
     ev.add_argument("--out", required=True, help="output folder for results.json, report.md and figures")
@@ -57,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--json", action="store_true", help="print results.json instead of the summary")
     ev.add_argument("--no-rule-tuning", action="store_true",
                     help="only the default rules (skip rules_tuned and rules_tuned_k1)")
+    ev.add_argument("--methods", help=f"comma-separated subset of: {', '.join(METHOD_ORDER)} "
+                                      f"(default: all; the default rules are always included)")
 
     sy = sub.add_parser("synth", help="generate synthetic logs (testing only, not for thesis results)")
     sy.add_argument("--out", required=True)
@@ -77,7 +79,8 @@ def main(argv: list[str] | None = None) -> int:
                                      train_frac=args.train_frac, grace=args.grace, seed=args.seed,
                                      start=args.start, end=args.end, make_figures=not args.no_figures,
                                      allow_incomplete=args.allow_incomplete,
-                                     tune_rules=not args.no_rule_tuning)
+                                     tune_rules=not args.no_rule_tuning,
+                                     methods=[m.strip() for m in args.methods.split(",")] if args.methods else None)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2

@@ -47,3 +47,46 @@ comparison against every variant. Thesis conclusions for Q3 use the tuned varian
 colours; `rules_tuned` is yellow and `rules_tuned_k1` violet (reference palette slots 4 and 7).
 Magenta (slot 5) was rejected because it is too close to Isolation Forest's orange for
 normal vision (ΔE 12.9 < 15); the chosen set passes the palette validator.
+
+**D9. Grid-edge check.** After tuning, every parameter whose chosen value is the smallest or
+largest grid value is compared with its neighbour (the next value inward, other parameters
+fixed). It is flagged in `results.json → rule_tuning.grid_edge` and in the report only if the
+neighbour is worse (lower training F1, or equal F1 with more false-alarm episodes), because
+only then may a better value lie outside the grid. Edges where the neighbour scores the same
+are not flagged: there the tie-break picked the edge, the data did not. `consecutive = 1` is
+never flagged, as it cannot go lower. The check only reports; it never extends the grid by
+itself, so the search stays fixed in advance.
+
+## Part 2 – Two more lightweight models
+
+**D10. PCA score = squared prediction error (SPE)** in the log1p + standardised feature space,
+using the components that explain 95 % of the variance of the **normal training windows**
+(`svd_solver="full"`, deterministic). It uses the same symptom features as Isolation Forest, so
+the two unsupervised models see identical inputs. If 95 % needs every component, the residual
+would always be zero, so one component is dropped; this is logged as `n_components`.
+
+**D11. PCA threshold = Isolation Forest's rule.** The 97th percentile of the training scores of
+normal windows (the value is taken from `IsolationForestDetector`, so changing one changes
+both). About 3 % of normal windows alert by construction for both unsupervised models.
+
+**D12. Logistic Regression settings.** All window features (the same columns as Random Forest),
+log1p + StandardScaler, `class_weight="balanced"`, `C = 1` (scikit-learn default, not tuned, in
+line with the untuned 300-tree forests), `max_iter = 2000` so that lbfgs converges, threshold
+0.5. The standardised coefficients (top 20 by size) are reported as its counterpart to Random
+Forest's feature importance.
+
+**D13. Method order and colours.** Methods are listed rules first, then Isolation Forest,
+Random Forest, PCA, Logistic Regression: the original methods keep their position and colour,
+and the new ones are appended. PCA is green and Logistic Regression magenta (reference palette
+slots 6 and 5). The order and colours were chosen together so that every pair of neighbouring
+bars passes the palette validator (colour-blind separation and normal-vision floor); placing
+PCA directly after Isolation Forest fails it for every remaining hue.
+
+**D14. Method selection.** `evaluate(methods=...)`, CLI `--methods` and the API's `methods`
+field choose a subset; the default rules are always included because every comparison is made
+against them. The CLI evaluates all seven methods by default. The API's `POST /evaluate` keeps
+its previous three methods unless `methods` or `tune_rules` is given, and the live detector
+(training, `/detect`, alerts, Telegram) is unchanged.
+
+**D15. SciPy pinned to 1.14.1.** scikit-learn 1.5.2 with SciPy 1.18 warns about an unknown
+lbfgs option in Logistic Regression; 1.14.1 is the release that matches the pinned scikit-learn.
