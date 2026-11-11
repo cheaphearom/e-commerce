@@ -201,15 +201,29 @@ curl -X POST localhost:8080/api/orders -H 'Content-Type: application/json' \
 
 Logs are written to `./logs/<service>.log`.
 
-Two web pages come with the system:
+Three web pages come with the system:
 
 | Page | Address | What it does |
 |---|---|---|
 | **Shop** | <http://localhost:8080> | choose a customer, order products, watch each order go through the saga (stock reserved → payment charged → completed, or cancelled with the reason) |
 | **Anomaly monitor** | <http://localhost:8000> | service health and active faults, fault injection with the experiment presets, the score of each detector over the last 30 minutes, the latest window with its explanation, recent alerts, and every experiment run with buttons to evaluate it or train the live detector on it, plus links to its report and figures |
+| **Database** (Adminer) | <http://localhost:8090> | browse and query the three databases: log in with System *PostgreSQL*, Server `postgres`, Username and Password `postgres`, Database `orderdb`, `inventorydb` or `paymentdb` |
 
 Close the shop while an experiment runs: its requests are real traffic in the logs. The monitor
 refuses manual faults while an experiment runs, because they would not be in its labels.
+Browsing the database is safe during an experiment: it does not go through the services, so it
+adds nothing to the logs.
+
+In Adminer, *select <table>* in the left menu shows the rows, *SQL command* runs any query. Useful
+tables: `orders` and `saga_state` (orderdb), `products` and `reservations` (inventorydb),
+`accounts` and `payments` (paymentdb). For example, how the sagas ended:
+
+```sql
+select status, failure_reason, count(*) from orders group by status, failure_reason order by count(*) desc;
+```
+
+A desktop tool (DBeaver, pgAdmin, DataGrip) works too: host `localhost`, **port 5433**, user and
+password `postgres`. Adminer is reachable only from this computer (`127.0.0.1`).
 
 ### 4.2 Run an experiment
 
@@ -607,7 +621,7 @@ python -m detector.cli cross --train-run ../results/run_1 --test-run ../results/
 .
 ├── pom.xml                      Maven parent (Java 21, Spring Boot 3.3.5, Spring Cloud 2023.0.3)
 ├── Dockerfile                   multi-stage build for any module (--build-arg MODULE=...)
-├── docker-compose.yml           postgres, kafka (KRaft), 4 services, ml-detector, experiment (profile)
+├── docker-compose.yml           postgres, kafka (KRaft), 4 services, ml-detector, Adminer (db-admin), experiment (profile)
 ├── docker/postgres/init.sql     creates orderdb, inventorydb, paymentdb
 ├── common/                      shared library (auto-configured for servlet apps)
 │   └── src/main/java/com/thesis/common/
