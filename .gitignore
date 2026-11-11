@@ -13,3 +13,6 @@ venv/
 
 # local secrets (Telegram token)
 .env
+
+# lock of scripts/run_all_experiments.sh
+.run-all-experiments.lock

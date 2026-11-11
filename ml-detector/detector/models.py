@@ -1,4 +1,4 @@
-"""The three detectors compared in the thesis.
+"""The detectors compared in the thesis.
 
 All share one interface:
 
@@ -12,7 +12,8 @@ features).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import itertools
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -53,7 +54,7 @@ class RuleBasedDetector:
     """
 
     name = "rules"
-    label = "Rule-based"
+    label = "Rule-based (default)"
 
     def __init__(self, config: RuleConfig | None = None, step: float = 10.0,
                  services: tuple[str, ...] = SERVICES):
@@ -95,6 +96,160 @@ class RuleBasedDetector:
     def fired_rules(self, X: pd.DataFrame) -> list[list[str]]:
         sustained = self.sustained_ratios(X)
         return [[name for name, v in row.items() if v > 1.0] for _, row in sustained.iterrows()]
+
+
+# ---------------------------------------------------------------------------------------
+# Rule tuning (training windows only)
+# ---------------------------------------------------------------------------------------
+RULE_TUNING_GRID: dict[str, tuple] = {
+    "consecutive": (1, 2, 3),
+    "gateway_5xx_ratio": (0.02, 0.05, 0.10),
+    "gateway_p95_ms": (1000.0, 2000.0, 3000.0),
+    "errors_per_service": (3.0, 5.0, 10.0),
+}
+
+
+def alert_episodes(pred: np.ndarray, starts: np.ndarray, step: float) -> list[tuple[int, int]]:
+    """Maximal runs of consecutive alerting windows as (first index, last index)."""
+    episodes = []
+    i, n = 0, len(pred)
+    while i < n:
+        if pred[i]:
+            j = i
+            while j + 1 < n and pred[j + 1] and abs(starts[j + 1] - starts[j] - step) <= step * 0.5:
+                j += 1
+            episodes.append((i, j))
+            i = j + 1
+        else:
+            i += 1
+    return episodes
+
+
+def _f1(y: np.ndarray, pred: np.ndarray) -> float:
+    tp = int(np.sum((pred == 1) & (y == 1)))
+    fp = int(np.sum((pred == 1) & (y == 0)))
+    fn = int(np.sum((pred == 0) & (y == 1)))
+    return 2 * tp / (2 * tp + fp + fn) if tp else 0.0
+
+
+def tune_rules(X: pd.DataFrame, y: np.ndarray, step: float = 10.0, grid: dict[str, tuple] | None = None,
+               base: RuleConfig | None = None,
+               services: tuple[str, ...] = SERVICES) -> tuple[RuleConfig, pd.DataFrame]:
+    """Grid search of the rule thresholds and ``consecutive`` on **training windows only**.
+
+    Every combination of ``grid`` is scored by window-level F1 against ``y``. The best F1 wins;
+    ties go to fewer false-alarm episodes (alert runs without any anomalous window), and any
+    remaining tie to the first combination in grid order. Returns the chosen config and the
+    full grid table (one row per combination, best first).
+    """
+    grid = grid or RULE_TUNING_GRID
+    base = base or RuleConfig()
+    y = np.asarray(y, dtype=int)
+    if len(X) != len(y):
+        raise ValueError("X and y must have the same length")
+    starts = X["window_start"].to_numpy(dtype=float) if "window_start" in X else np.arange(len(X)) * step
+    keys = list(grid)
+    rows = []
+    for order, values in enumerate(itertools.product(*(grid[k] for k in keys))):
+        cfg = replace(base, **dict(zip(keys, values)))
+        pred = RuleBasedDetector(cfg, step=step, services=services).predict(X) if len(X) else np.zeros(0, int)
+        false_eps = sum(1 for a, b in alert_episodes(pred, starts, step) if y[a:b + 1].sum() == 0)
+        rows.append({**dict(zip(keys, values)), "f1": _f1(y, pred), "false_alarm_episodes": false_eps,
+                     "alerts": int(pred.sum()), "grid_order": order})
+    table = pd.DataFrame(rows).sort_values(["f1", "false_alarm_episodes", "grid_order"],
+                                           ascending=[False, True, True], kind="stable").reset_index(drop=True)
+    best = table.iloc[0]
+    chosen = {k: (int(best[k]) if k in ("consecutive", "min_requests") else float(best[k])) for k in keys}
+    return replace(base, **chosen), table
+
+
+# parameters whose smallest grid value is also the smallest meaningful value
+NATURAL_LOWER_BOUNDS = {"consecutive": 1}
+
+
+def grid_edge_check(table: pd.DataFrame, grid: dict[str, tuple]) -> list[dict]:
+    """Flags tuned parameters that sit on the edge of the grid **and** matter there.
+
+    For each parameter whose chosen value is the smallest or largest grid value, the best row
+    is compared with its neighbour (the next grid value inward, all other parameters equal).
+    If the neighbour is worse (lower training F1, or equal F1 with more false-alarm episodes),
+    the optimum may lie outside the grid and the grid should be extended in that direction.
+    Edges where the neighbour scores the same are not flagged (the parameter is indifferent
+    there). ``consecutive = 1`` is a natural lower bound and never flagged.
+    """
+    best = table.iloc[0]
+    keys = list(grid)
+    flags = []
+    for k in keys:
+        values = sorted(grid[k])
+        if len(values) < 2:
+            continue
+        v = best[k]
+        if v == values[0] and NATURAL_LOWER_BOUNDS.get(k) != values[0]:
+            side, neighbour = "lower", values[1]
+        elif v == values[-1]:
+            side, neighbour = "upper", values[-2]
+        else:
+            continue
+        same = np.ones(len(table), dtype=bool)
+        for other in keys:
+            same &= (table[other] == (neighbour if other == k else best[other])).to_numpy()
+        row = table[same].iloc[0]
+        worse = row["f1"] < best["f1"] or (row["f1"] == best["f1"]
+                                           and row["false_alarm_episodes"] > best["false_alarm_episodes"])
+        if worse:
+            flags.append({"parameter": k, "edge": side, "value": float(v), "neighbour": float(neighbour),
+                          "f1": float(best["f1"]), "neighbour_f1": float(row["f1"]),
+                          "false_alarm_episodes": int(best["false_alarm_episodes"]),
+                          "neighbour_false_alarm_episodes": int(row["false_alarm_episodes"])})
+    return flags
+
+
+class TunedRuleBasedDetector(RuleBasedDetector):
+    """The same rules with thresholds and ``consecutive`` chosen by :func:`tune_rules`.
+
+    ``fit`` needs the labels of the training windows; nothing else is learned.
+    """
+
+    name = "rules_tuned"
+    label = "Rule-based (tuned)"
+    consecutive_override: int | None = None
+
+    def __init__(self, step: float = 10.0, grid: dict[str, tuple] | None = None,
+                 services: tuple[str, ...] = SERVICES):
+        super().__init__(RuleConfig(), step=step, services=services)
+        self.grid = grid or RULE_TUNING_GRID
+        self.tuning_: dict = {}
+
+    def fit(self, X: pd.DataFrame, y: np.ndarray | None = None) -> "TunedRuleBasedDetector":
+        if y is None:
+            raise ValueError("rule tuning needs the labels of the training windows")
+        tuned, table = tune_rules(X, y, self.step, self.grid, services=self.services)
+        best = table.iloc[0]
+        self.config = tuned if self.consecutive_override is None else replace(
+            tuned, consecutive=self.consecutive_override)
+        self.tuning_ = {
+            "objective": "max window F1 on training windows; ties: fewer false-alarm episodes, then grid order",
+            "grid": {k: list(v) for k, v in self.grid.items()},
+            "candidates": int(len(table)),
+            "tied_best": int(((table["f1"] == best["f1"])
+                              & (table["false_alarm_episodes"] == best["false_alarm_episodes"])).sum()),
+            "train_windows": int(len(X)),
+            "train_f1": float(best["f1"]),
+            "train_false_alarm_episodes": int(best["false_alarm_episodes"]),
+            "selected": {k: getattr(tuned, k) for k in self.grid},
+            "top": table.head(10).drop(columns="grid_order").to_dict(orient="records"),
+            "grid_edge": grid_edge_check(table, self.grid),
+        }
+        return self
+
+
+class TunedRuleK1Detector(TunedRuleBasedDetector):
+    """Tuned thresholds (from the same search) but alerting on a single window (``consecutive=1``)."""
+
+    name = "rules_tuned_k1"
+    label = "Rule-based (tuned, k=1)"
+    consecutive_override = 1
 
 
 def sustained_min(values: np.ndarray, k: int, starts: np.ndarray | None = None,
@@ -237,9 +392,127 @@ class RandomForestDetector:
         return pairs[:top] if top else pairs
 
 
-METHOD_ORDER = (RuleBasedDetector.name, IsolationForestDetector.name, RandomForestDetector.name)
+# ---------------------------------------------------------------------------------------
+# PCA reconstruction error (unsupervised, trained on normal windows only)
+# ---------------------------------------------------------------------------------------
+class PCADetector:
+    """log1p + StandardScaler + PCA on the symptom features, fitted on normal windows only.
+
+    The score is the squared prediction error (SPE): the squared distance between a scaled
+    window and its reconstruction from the components that explain ``variance`` of the normal
+    training data. The alert threshold follows the same rule as Isolation Forest: the
+    ``percentile``-th percentile of the training scores.
+    """
+
+    name = "pca"
+    label = "PCA (reconstruction)"
+
+    def __init__(self, variance: float = 0.95, percentile: float = 97.0):
+        self.variance = variance
+        self.percentile = percentile
+        self.columns_: list[str] = []
+        self.threshold_: float = np.inf
+        self.scaler_: Pipeline | None = None
+        self.pca_ = None
+        self.n_components_: int = 0
+        self.explained_variance_: float = 0.0
+
+    def fit(self, X: pd.DataFrame, y: np.ndarray | None = None) -> "PCADetector":
+        from sklearn.decomposition import PCA
+
+        normal = X if y is None else X[np.asarray(y) == 0]
+        if len(normal) < 10:
+            raise ValueError(f"PCA needs at least 10 normal windows, got {len(normal)}")
+        self.columns_ = symptom_columns(X.columns)
+        self.scaler_ = Pipeline([("log1p", FunctionTransformer(_log1p_nonneg)), ("scale", StandardScaler())])
+        Z = self.scaler_.fit_transform(normal[self.columns_].to_numpy(dtype=float))
+        pca = PCA(n_components=self.variance, svd_solver="full").fit(Z)
+        if pca.n_components_ >= Z.shape[1]:
+            # every direction kept: the residual would always be 0, so drop the weakest one
+            pca = PCA(n_components=max(Z.shape[1] - 1, 1), svd_solver="full").fit(Z)
+        self.pca_ = pca
+        self.n_components_ = int(pca.n_components_)
+        self.explained_variance_ = float(pca.explained_variance_ratio_.sum())
+        self.threshold_ = float(np.percentile(self._spe(Z), self.percentile))
+        return self
+
+    def _spe(self, Z: np.ndarray) -> np.ndarray:
+        recon = self.pca_.inverse_transform(self.pca_.transform(Z))
+        return np.sum((Z - recon) ** 2, axis=1)
+
+    def score(self, X: pd.DataFrame) -> np.ndarray:
+        if self.pca_ is None:
+            raise RuntimeError("PCADetector is not fitted")
+        if len(X) == 0:
+            return np.zeros(0)
+        return self._spe(self.scaler_.transform(X[self.columns_].to_numpy(dtype=float)))
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return (self.score(X) > self.threshold_).astype(int)
+
+
+# ---------------------------------------------------------------------------------------
+# Logistic Regression (supervised)
+# ---------------------------------------------------------------------------------------
+class LogisticRegressionDetector:
+    """log1p + StandardScaler + Logistic Regression on every window feature (balanced weights)."""
+
+    name = "logistic_regression"
+    label = "Logistic Regression"
+
+    def __init__(self, C: float = 1.0, threshold: float = 0.5, random_state: int = 42, max_iter: int = 2000):
+        self.C = C
+        self.threshold = threshold
+        self.random_state = random_state
+        self.max_iter = max_iter
+        self.columns_: list[str] = []
+        self.pipeline_: Pipeline | None = None
+
+    def fit(self, X: pd.DataFrame, y: np.ndarray | None = None) -> "LogisticRegressionDetector":
+        from sklearn.linear_model import LogisticRegression
+
+        if y is None:
+            raise ValueError("Logistic Regression is supervised and needs labels")
+        y = np.asarray(y, dtype=int)
+        if np.unique(y).size < 2:
+            raise ValueError("Logistic Regression needs both normal and anomalous windows in the training data")
+        self.columns_ = model_feature_columns(X)
+        self.pipeline_ = Pipeline([
+            ("log1p", FunctionTransformer(_log1p_nonneg)),
+            ("scale", StandardScaler()),
+            ("lr", LogisticRegression(C=self.C, class_weight="balanced", max_iter=self.max_iter,
+                                      random_state=self.random_state)),
+        ])
+        self.pipeline_.fit(X[self.columns_].to_numpy(dtype=float), y)
+        return self
+
+    def score(self, X: pd.DataFrame) -> np.ndarray:
+        if self.pipeline_ is None:
+            raise RuntimeError("LogisticRegressionDetector is not fitted")
+        if len(X) == 0:
+            return np.zeros(0)
+        return self.pipeline_.predict_proba(X[self.columns_].to_numpy(dtype=float))[:, 1]
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return (self.score(X) >= self.threshold).astype(int)
+
+    def coefficients(self, top: int | None = None) -> list[tuple[str, float]]:
+        """Standardised coefficients, largest absolute value first."""
+        if self.pipeline_ is None:
+            return []
+        coef = self.pipeline_.named_steps["lr"].coef_[0]
+        pairs = sorted(((c, float(v)) for c, v in zip(self.columns_, coef)), key=lambda p: -abs(p[1]))
+        return pairs[:top] if top else pairs
+
+
+RULE_METHODS = (RuleBasedDetector.name, TunedRuleBasedDetector.name, TunedRuleK1Detector.name)
+ML_METHODS = (IsolationForestDetector.name, RandomForestDetector.name, PCADetector.name,
+              LogisticRegressionDetector.name)
+METHOD_ORDER = RULE_METHODS + ML_METHODS
+# methods of the live detector (API, notifications); the tuned rules exist only in evaluations
+LIVE_METHODS = (RuleBasedDetector.name, IsolationForestDetector.name, RandomForestDetector.name)
 METHOD_LABELS = {
-    RuleBasedDetector.name: RuleBasedDetector.label,
-    IsolationForestDetector.name: IsolationForestDetector.label,
-    RandomForestDetector.name: RandomForestDetector.label,
+    cls.name: cls.label
+    for cls in (RuleBasedDetector, TunedRuleBasedDetector, TunedRuleK1Detector,
+                IsolationForestDetector, PCADetector, RandomForestDetector, LogisticRegressionDetector)
 }
