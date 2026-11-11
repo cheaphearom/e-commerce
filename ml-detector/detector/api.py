@@ -35,6 +35,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import __version__
@@ -81,6 +82,8 @@ class Settings:
         m.strip() for m in os.environ.get("NOTIFY_METHODS", ",".join(LIVE_METHODS)).split(",") if m.strip()))
     notify_resolve_after_s: float = field(
         default_factory=lambda: float(os.environ.get("NOTIFY_RESOLVE_AFTER_S", "60")))
+    cors_allow_origins: tuple[str, ...] = field(default_factory=lambda: tuple(
+        o.strip() for o in os.environ.get("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()))
 
 
 class TrainRequest(BaseModel):
@@ -339,6 +342,10 @@ def create_app(settings: Settings | None = None, send=None) -> FastAPI:
                 await task
 
     app = FastAPI(title="Log anomaly detector", version=__version__, lifespan=lifespan)
+    # CORS for the Flutter web app (mobile/), which runs on another origin; native apps and the
+    # dashboard (same origin) do not need it. Restrict with CORS_ALLOW_ORIGINS="http://host:port,...".
+    app.add_middleware(CORSMiddleware, allow_origins=settings.cors_allow_origins,
+                       allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"])
     app.state.detector = state
     register_dashboard(app, state, settings)
 

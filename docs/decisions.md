@@ -225,3 +225,32 @@ load-period filter keep start-up effects out of every run. Only run 1 may see a 
 for start-up, health wait, log copy and evaluation) + about 10 min for aggregate and cross;
 about 15 h 50 min for the default 5 × 180 min. `OVERHEAD_MIN` and `FINAL_MIN` adjust the
 estimate only.
+
+## Mobile app (`mobile/`)
+
+**D41. One Flutter app with Monitor, Shop and Settings tabs, for Android and the web.** The
+monitor mirrors the web dashboard (it uses the same ml-detector endpoints); the shop mirrors the
+shop page (the same gateway endpoints). No backend endpoint was added for the app.
+
+**D42. The app cannot spoil an experiment.** Shop requests are real traffic in the analysed
+logs, so the Shop tab first asks the ml-detector whether an experiment holds the lock and, if
+one does, sends no request to the gateway at all. Only the visible tab polls, and the app opens
+on the Monitor tab. The monitor only calls the ml-detector, whose requests do not appear in the
+analysed service logs (checked: a monitor poll adds no gateway access-log line), and its fault
+button is disabled during an experiment, like the web dashboard's. The connection test uses only
+the monitor. Tests assert that no gateway request is made in these cases.
+
+**D43. CORS for the web build only.** A browser blocks calls from the web app's origin
+(e.g. port 5000) to ports 8080 and 8000 unless the servers allow it. The gateway answers CORS
+preflight requests for `/api/**` itself (GET and POST only), before routing, so preflights never
+reach a service or the access log (tested). The ml-detector adds the same headers. Both allow
+every origin by default (a local research setup) and can be restricted with
+`CORS_ALLOWED_ORIGINS` / `CORS_ALLOW_ORIGINS`. Native Android requests are not affected by CORS.
+
+**D44. Plain HTTP on the local network.** The system runs on the PC without TLS, so the Android
+app allows cleartext traffic (`usesCleartextTraffic`). This is acceptable for a lab setup on a
+private Wi-Fi; a deployment beyond that would need HTTPS.
+
+**D45. Same colours as the thesis figures.** Each detector has the same colour in the app, the
+web dashboard and the evaluation figures; status labels always carry an icon and a word, never
+colour alone.
