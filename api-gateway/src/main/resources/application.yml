@@ -11,6 +11,16 @@ spring:
       httpclient:
         connect-timeout: 2000
         response-timeout: 10s
+      # CORS for the Flutter web app (mobile/), which runs on another origin. Native apps and the
+      # shop page do not need it. Preflight requests are answered here, before routing, so they
+      # never reach the access log. Restrict with CORS_ALLOWED_ORIGINS, e.g. http://localhost:5000
+      globalcors:
+        cors-configurations:
+          '[/api/**]':
+            allowedOriginPatterns: ${CORS_ALLOWED_ORIGINS:*}
+            allowedMethods: GET,POST,OPTIONS
+            allowedHeaders: "*"
+            maxAge: 3600
       routes:
         - id: orders
           uri: ${ORDER_SERVICE_URL:http://localhost:8081}

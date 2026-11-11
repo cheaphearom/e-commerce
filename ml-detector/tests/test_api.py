@@ -60,3 +60,22 @@ def test_train_rejects_empty_log_dir(client, tmp_path):
     empty.mkdir()
     response = client.post("/train", json={"logs_dir": str(empty)})
     assert response.status_code == 400
+
+
+def test_cors_allows_the_flutter_web_app(client):
+    pre = client.options("/api/services", headers={"Origin": "http://localhost:5000",
+                                                   "Access-Control-Request-Method": "GET"})
+    assert pre.status_code == 200
+    assert pre.headers["access-control-allow-origin"] in ("*", "http://localhost:5000")
+    got = client.get("/health", headers={"Origin": "http://localhost:5000"})
+    assert got.headers["access-control-allow-origin"] in ("*", "http://localhost:5000")
+
+
+def test_cors_origins_can_be_restricted(synthetic_run, tmp_path):
+    settings = Settings(log_dir=str(synthetic_run / "logs"), results_dir=str(tmp_path / "r"),
+                        model_dir=str(tmp_path / "m"), live=False, cors_allow_origins=("http://phone.local:5000",))
+    with TestClient(create_app(settings)) as c:
+        ok = c.get("/health", headers={"Origin": "http://phone.local:5000"})
+        assert ok.headers.get("access-control-allow-origin") == "http://phone.local:5000"
+        other = c.get("/health", headers={"Origin": "http://evil.example"})
+        assert "access-control-allow-origin" not in other.headers
