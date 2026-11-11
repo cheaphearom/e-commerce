@@ -362,6 +362,19 @@ python -m detector.cli evaluate --logs ./synthetic/logs --labels ./synthetic/lab
 > Synthetic logs use the same JSON format, and their faults ramp up gradually. They exist **only
 > to test the code**; do not report results from them in the thesis.
 
+### 4.7 Mobile app (Android and web)
+
+`mobile/` is a Flutter app with three tabs: **Monitor** (service health, live scores, alerts with
+explanations, experiment results, fault injection), **Shop** (order products and follow the
+saga) and **Settings** (the PC's address). Install the APK on an Android phone that is on the same
+Wi-Fi as the PC, then enter the PC's address (`ipconfig` → IPv4 Address) under Settings. The web
+build runs in any browser. Details, build and test commands: [`mobile/README.md`](mobile/README.md).
+
+The Shop tab sends nothing while an experiment runs and the Monitor tab never touches the
+services, so the app cannot spoil an experiment's logs. For the web build, the gateway and the
+ml-detector allow cross-origin requests (CORS); restrict them with `CORS_ALLOWED_ORIGINS` and
+`CORS_ALLOW_ORIGINS` if needed.
+
 ---
 
 ## 5. ML pipeline
@@ -635,7 +648,8 @@ python -m detector.cli cross --train-run ../results/run_1 --test-run ../results/
 ├── inventory-service/           Product, Reservation, RESERVE/RELEASE, restock API, seeding
 ├── payment-service/             Account, Payment, CHARGE/REFUND, top-up API, seeding
 ├── scripts/run_all_experiments.sh  overnight run: 5 experiments, evaluation, aggregate, cross
-├── docs/decisions.md            design decisions for the methodology chapter (D1–D40)
+├── docs/decisions.md            design decisions for the methodology chapter (D1–D45)
+├── mobile/                      Flutter app (Android + web): monitor, shop, settings; see mobile/README.md
 ├── experiment/
 │   ├── load_generator.py        Poisson traffic through the gateway
 │   └── run_experiment.py        warm-up, random faults, labels.csv, experiment.json
