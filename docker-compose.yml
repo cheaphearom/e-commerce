@@ -178,6 +178,22 @@ services:
     ports:
       - "8000:8000"
 
+  db-admin:
+    # Adminer: database web interface at http://localhost:8090
+    # (System: PostgreSQL, Server: postgres, Username/Password: postgres, Database: orderdb, inventorydb or paymentdb)
+    image: adminer:4.8.1
+    logging: *logging
+    restart: unless-stopped
+    # listen on IPv4 explicitly: the image's default address ([::]) fails where Docker has no IPv6
+    command: ["php", "-S", "0.0.0.0:8080", "-t", "/var/www/html"]
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    ports:
+      - "127.0.0.1:8090:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   experiment:
     logging: *logging
     profiles: ["experiment"]
