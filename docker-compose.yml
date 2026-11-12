@@ -178,6 +178,18 @@ services:
     ports:
       - "8000:8000"
 
+  web:
+    # Saga Store, the e-commerce website (React): http://localhost:3000
+    build:
+      context: ./web
+    logging: *logging
+    restart: unless-stopped
+    environment:
+      GATEWAY_UPSTREAM: api-gateway:8080
+      MONITOR_UPSTREAM: ml-detector:8000
+    ports:
+      - "3000:80"
+
   db-admin:
     # Adminer: database web interface at http://localhost:8090
     # (System: PostgreSQL, Server: postgres, Username/Password: postgres, Database: orderdb, inventorydb or paymentdb)

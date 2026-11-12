@@ -201,11 +201,12 @@ curl -X POST localhost:8080/api/orders -H 'Content-Type: application/json' \
 
 Logs are written to `./logs/<service>.log`.
 
-Three web pages come with the system:
+Four web pages come with the system:
 
 | Page | Address | What it does |
 |---|---|---|
-| **Shop** | <http://localhost:8080> | choose a customer, order products, watch each order go through the saga (stock reserved → payment charged → completed, or cancelled with the reason) |
+| **Saga Store** (web shop) | <http://localhost:3000> | the full e-commerce website: catalogue with search and filters, product pages, cart, checkout paid from the customer's wallet, card top-up (simulated), order tracking through the saga, account with order history, sign-in/out and admin pages. See [`web/README.md`](web/README.md) |
+| **Shop** (simple test page) | <http://localhost:8080> | choose a customer, order products, watch each order go through the saga (stock reserved → payment charged → completed, or cancelled with the reason) |
 | **Anomaly monitor** | <http://localhost:8000> | service health and active faults, fault injection with the experiment presets, the score of each detector over the last 30 minutes, the latest window with its explanation, recent alerts, and every experiment run with buttons to evaluate it or train the live detector on it, plus links to its report and figures |
 | **Database** (Adminer) | <http://localhost:8090> | browse and query the three databases: log in with System *PostgreSQL*, Server `postgres`, Username and Password `postgres`, Database `orderdb`, `inventorydb` or `paymentdb` |
 
@@ -374,6 +375,15 @@ The Shop tab sends nothing while an experiment runs and the Monitor tab never to
 services, so the app cannot spoil an experiment's logs. For the web build, the gateway and the
 ml-detector allow cross-origin requests (CORS); restrict them with `CORS_ALLOWED_ORIGINS` and
 `CORS_ALLOW_ORIGINS` if needed.
+
+### 4.8 Web shop (Saga Store)
+
+`web/` is a React + TypeScript e-commerce site served by nginx on port 3000 (service `web` in
+`docker-compose.yml`). It uses only the existing APIs; the services and the log format did not
+change. Demo sign-in: customers `C-001` to `C-020` with password `shop123`, admin `admin` /
+`admin123` (these guard the site's pages only). Checkout pays from the wallet through the saga; the
+top-up page simulates a card payment (test card `4242 4242 4242 4242`). While an experiment runs
+the site shows a pause page and sends nothing to the gateway. Details: [`web/README.md`](web/README.md).
 
 ---
 
@@ -634,7 +644,7 @@ python -m detector.cli cross --train-run ../results/run_1 --test-run ../results/
 .
 ├── pom.xml                      Maven parent (Java 21, Spring Boot 3.3.5, Spring Cloud 2023.0.3)
 ├── Dockerfile                   multi-stage build for any module (--build-arg MODULE=...)
-├── docker-compose.yml           postgres, kafka (KRaft), 4 services, ml-detector, Adminer (db-admin), experiment (profile)
+├── docker-compose.yml           postgres, kafka (KRaft), 4 services, ml-detector, web shop, Adminer (db-admin), experiment (profile)
 ├── docker/postgres/init.sql     creates orderdb, inventorydb, paymentdb
 ├── common/                      shared library (auto-configured for servlet apps)
 │   └── src/main/java/com/thesis/common/
@@ -648,7 +658,8 @@ python -m detector.cli cross --train-run ../results/run_1 --test-run ../results/
 ├── inventory-service/           Product, Reservation, RESERVE/RELEASE, restock API, seeding
 ├── payment-service/             Account, Payment, CHARGE/REFUND, top-up API, seeding
 ├── scripts/run_all_experiments.sh  overnight run: 5 experiments, evaluation, aggregate, cross
-├── docs/decisions.md            design decisions for the methodology chapter (D1–D45)
+├── docs/decisions.md            design decisions for the methodology chapter (D1–D51)
+├── web/                         Saga Store, the React e-commerce site (nginx, port 3000); see web/README.md
 ├── mobile/                      Flutter app (Android + web): monitor, shop, settings; see mobile/README.md
 ├── experiment/
 │   ├── load_generator.py        Poisson traffic through the gateway

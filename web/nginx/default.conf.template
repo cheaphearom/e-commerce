@@ -1,0 +1,40 @@
+# Saga Store: serves the built site and forwards the APIs, so the browser only talks to this
+# origin (no CORS). ${GATEWAY_UPSTREAM}, ${MONITOR_UPSTREAM} and ${NGINX_RESOLVER} are filled in
+# by the nginx image at start (see Dockerfile and docker-compose.yml).
+server {
+    listen ${NGINX_PORT};
+    server_name _;
+    root /usr/share/nginx/html;
+
+    # resolve the upstreams per request, so nginx starts even before the services are up
+    resolver ${NGINX_RESOLVER} valid=10s ipv6=off;
+    set $gateway http://${GATEWAY_UPSTREAM};
+    set $monitor http://${MONITOR_UPSTREAM};
+
+    # shop API -> api-gateway (real traffic, ends up in the analysed logs)
+    location /api/ {
+        proxy_pass $gateway;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 15s;
+    }
+
+    # experiment check -> ml-detector (not part of the analysed logs)
+    location /monitor/ {
+        rewrite ^/monitor/(.*)$ /$1 break;
+        proxy_pass $monitor;
+        proxy_read_timeout 10s;
+    }
+
+    # hashed build files can be cached for a long time
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
+    # single-page app: every other path is a page of the app
+    location / {
+        add_header Cache-Control "no-cache";
+        try_files $uri /index.html;
+    }
+}
