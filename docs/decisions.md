@@ -254,3 +254,37 @@ private Wi-Fi; a deployment beyond that would need HTTPS.
 **D45. Same colours as the thesis figures.** Each detector has the same colour in the app, the
 web dashboard and the evaluation figures; status labels always carry an icon and a word, never
 colour alone.
+
+## Web shop (`web/`, Saga Store)
+
+**D46. Frontend only.** The site uses the existing gateway APIs (products, accounts, orders,
+top-up, restock); no service, saga step or log line changed, so the experiments and their logs
+stay comparable. Because an order holds one product, a cart becomes one order per line; each runs
+its own saga, and the confirmation page follows all of them.
+
+**D47. Demo sign-in.** The backend has no user accounts. The site's sign-in (customers C-001 to
+C-020 with one demo password, plus an admin) only decides which pages are shown; it is not
+security, and the README and the sign-in page say so. Real authentication would need a backend
+identity service and tokens checked by the gateway.
+
+**D48. Payment = the existing payment-service.** Checkout pays from the customer's wallet, which
+the payment-service charges inside the saga (and refunds on compensation). The card form tops up
+the wallet through a simulated provider: card details are validated (Luhn, expiry, security code)
+and authorised in the browser and never sent; only the amount reaches
+`POST /api/accounts/{id}/topup`. A real provider (e.g. Stripe) would need a backend endpoint and
+secret keys, which the frontend-only scope excluded.
+
+**D49. The site cannot spoil an experiment.** Before rendering any page the site asks the
+ml-detector for the experiment lock; while it exists, every page is replaced by a pause page and
+no request goes to the gateway (verified on the live system: 0 gateway access-log lines). The
+site does not poll the shop in the background; only the confirmation and order pages poll, and
+only until their orders are final.
+
+**D50. One origin through nginx.** nginx serves the built site and forwards `/api` to the gateway
+and `/monitor` to the ml-detector, so the browser needs no CORS. Upstreams are resolved per
+request, so the site starts before the services are healthy.
+
+**D51. Order history beyond the latest 100.** The order list endpoint returns the 100 most recent
+orders of all customers. The account page combines those with the orders this browser placed
+(remembered ids, fetched one by one), so a customer's own orders do not disappear when others
+order a lot; the admin pages state that they show the latest 100.
