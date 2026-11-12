@@ -48,7 +48,8 @@ requests for this (CORS); restrict them with `CORS_ALLOWED_ORIGINS` (gateway) an
 
 ## Build and test
 
-Flutter 3.47 (stable) with the Android SDK (platform 36). From this folder:
+Flutter 3.50 (stable) with the Android SDK (platform 36); the Android build uses Gradle 9.5.0 and the
+Android Gradle Plugin 9.3.1, the versions of the Flutter 3.50 template. From this folder:
 
 ```bash
 flutter pub get
